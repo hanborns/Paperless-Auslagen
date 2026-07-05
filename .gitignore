@@ -1,0 +1,11 @@
+# Secrets – niemals committen
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Laufzeit-Artefakte
+*.xlsx
+.receipt_worker_state.json
+receipt-worker.log

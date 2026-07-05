@@ -1,0 +1,55 @@
+# Receipt-Worker – als eigener Stack in Portainer oder als zusätzlicher
+# Service im bestehenden Paperless-Stack deploybar.
+#
+# WICHTIG: Der Worker muss im selben Docker-Netzwerk wie Paperless hängen,
+# damit post-consume.sh ihn unter http://receipt-worker:5000 erreicht.
+# Netzwerknamen unten anpassen (docker network ls).
+
+services:
+  receipt-worker:
+    # Fertiges Image aus der GitHub Container Registry (wird per GitHub
+    # Actions aus https://github.com/hanborns/Paperless-Auslagen gebaut).
+    # Hinweis: GHCR-Namen sind immer lowercase.
+    image: ghcr.io/hanborns/paperless-auslagen:latest
+    # Alternativ lokal bauen (Zeile oben auskommentieren):
+    # build: .
+    container_name: receipt-worker
+    restart: unless-stopped
+    environment:
+      # --- Paperless-Zugriff ---
+      PAPERLESS_URL: "http://paperless-webserver:8000"   # Service-Name des Paperless-Webservers
+      PAPERLESS_TOKEN: "${PAPERLESS_TOKEN}"              # API-Token, siehe README
+
+      # --- AI-Provider: Option A (Anthropic API) ---
+      PROVIDER: "anthropic"
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+      ANTHROPIC_MODEL: "claude-sonnet-4-6"
+
+      # --- Option C (lokal via Ollama) – zum Umschalten nur diese 3 Zeilen: ---
+      # PROVIDER: "openai"
+      # OPENAI_BASE_URL: "http://ollama:11434"
+      # OPENAI_MODEL: "qwen2.5vl:7b"
+
+      # --- Ausgabe ---
+      OUTPUT_DIR: "/output"
+      OPEN_FILENAME: "Abrechnung_offen.xlsx"
+
+      # --- Tags (müssen zu den Tags in Paperless passen, siehe post-consume.sh) ---
+      # Diese beiden Variablen gehören in den PAPERLESS-Stack, nicht hierher –
+      # hier nur als Referenz dokumentiert:
+      #   RECEIPT_TRIGGER_TAG: abrechnung           (markierte Positionen)
+      #   RECEIPT_FULL_TAG: abrechnung-komplett     (ganzer Beleg)
+
+      # --- Optional: Home-Assistant-Webhook ---
+      # HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/DEINE_WEBHOOK_ID"
+    volumes:
+      # Zielordner für die Excel-Datei – auf einen vom Handy/PC erreichbaren
+      # NAS-Share mounten:
+      - /volume1/shares/abrechnung:/output
+    networks:
+      - paperless
+
+networks:
+  paperless:
+    external: true
+    name: paperless_default   # anpassen: Netzwerk des Paperless-Stacks
