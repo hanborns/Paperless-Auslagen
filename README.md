@@ -1,39 +1,52 @@
 # Receipt-Worker: Geteilte Einkaufsbelege aus Paperless-ngx abrechnen
 
-Automatisiert die Aufteilung gemeinsamer Einkaufsbelege: Handschriftlich
-markierte Bons werden nach dem Scannen per Vision-LLM ausgelesen und in eine
-Excel-Datei mit Summenblatt übertragen.
+Automatisiert die Aufteilung gemeinsamer Einkaufsbelege: Bons werden nach dem
+Scannen per Vision-LLM (oder Azure Document Intelligence) vollständig
+ausgelesen und in Excel-Dateien mit Summenblatt übertragen – eine Datei pro
+Person, falls mehrere Personen abgerechnet werden.
 
 ## Ablauf im Alltag
 
-1. **An der Kasse / zu Hause:** abzurechnende Positionen auf dem Bon
-   markieren – **R** = komplette Menge, Zahl daneben (z. B. „4") = dieser
-   Anteil, keine Markierung = gehört dir.
-2. **Scannen** wie gewohnt, Tag `abrechnung` vergeben (manuell, per
-   Scanner-Profil oder Paperless-Workflow). **Sonderfall kompletter
-   abzurechnender Einkauf:** stattdessen Tag `abrechnung-komplett`
-   vergeben – dann geht der gesamte Beleg ohne jede Markierung in die
-   Abrechnung ein.
-3. **Fertig.** Der Worker legt in `Abrechnung_offen.xlsx` ein neues Blatt
-   an, das Summenblatt zeigt den offenen Gesamtbetrag.
+1. **Scannen** wie gewohnt und in Paperless taggen (manuell, per
+   Scanner-Profil oder Paperless-Workflow):
+   - Tag `Auslagen` (Name konfigurierbar über `RECEIPT_TRIGGER_TAG`) –
+     löst die Verarbeitung überhaupt erst aus.
+   - Zusätzlich ein Personen-Tag (z. B. `Rose`), falls der Beleg einer
+     bestimmten Person zugeordnet werden soll. Ohne passenden Personen-Tag
+     landet der Beleg in der gemeinsamen Standarddatei. Mit mehreren
+     passenden Personen-Tags landet er in jeder betroffenen Datei.
+2. **Fertig.** Der Worker extrahiert alle Positionen vollständig (Anteil =
+   Menge) und legt in `Abrechnung_offen[_<Person>].xlsx` ein neues Blatt an;
+   das Summenblatt zeigt den offenen Gesamtbetrag.
+3. **Nur ein Teil sollte abgerechnet werden?** Direkt in der gelben Spalte
+   „Anteil abrechnen" im Excel-Blatt korrigieren – der Betrag rechnet sich
+   per Formel neu.
 4. **Nach der Überweisung:** Datei umbenennen (z. B.
-   `Abrechnung_2026-07_beglichen.xlsx`). Beim nächsten Beleg wird
-   automatisch eine frische Datei mit Summenblatt angelegt.
+   `Abrechnung_2026-07_beglichen.xlsx`). Beim nächsten Beleg für diese
+   Person wird automatisch eine frische Datei mit Summenblatt angelegt.
 
-Gelbe Zellen (Spalte „Anteil") sind die vom Modell gelesenen Handschrift-
-Werte – bei Bedarf einfach in Excel korrigieren, die Beträge rechnen sich per
-Formel neu. Rote Blatt-Reiter bedeuten: extrahierte Positionssumme weicht von
-der gedruckten Bon-Summe ab → Blatt kurz gegenprüfen.
+Rote Blatt-Reiter bedeuten: extrahierte Positionssumme weicht von der
+gedruckten Bon-Summe ab → Blatt kurz gegenprüfen.
+
+**Verarbeitet-Tag:** Nach erfolgreicher Verarbeitung setzt der Worker den Tag
+`Verarbeitet` (konfigurierbar über `RECEIPT_PROCESSED_TAG`) – das ist der
+Duplikatschutz. Ihn in Paperless zu entfernen lässt den Beleg beim nächsten
+Scan (siehe unten) oder erneuten Consume noch einmal verarbeiten.
+
+**Backlog-Scan:** Läuft periodisch im Hintergrund (`SCAN_INTERVAL_MINUTES`,
+Standard 30) und über den Endpunkt `POST /scan` auch manuell auslösbar. Fängt
+Belege ab, die zwar den Trigger-Tag tragen, aber – z. B. weil sie per E-Mail
+importiert und erst nachträglich getaggt wurden – nie den Post-Consume-Hook
+durchlaufen haben.
 
 ## Deployment
 
 ### 1. Paperless vorbereiten
 
-- Zwei Tags anlegen (Namen frei wählbar, müssen zu `RECEIPT_TRIGGER_TAG`
-  bzw. `RECEIPT_FULL_TAG` passen):
-  - `abrechnung` – markierte Positionen werden abgerechnet
-  - `abrechnung-komplett` – der gesamte Beleg wird abgerechnet
-    (hat Vorrang, falls beide gesetzt sind)
+- Trigger-Tag anlegen (Name frei wählbar, muss zu `RECEIPT_TRIGGER_TAG`
+  passen): `Auslagen`.
+- Je Person, die abgerechnet wird, einen eigenen Tag anlegen (z. B. `Rose`)
+  und in `RECEIPT_PERSON_TAGS` eintragen (kommasepariert).
 - API-Token holen: Paperless-Web-UI → Profilsymbol → **API-Token**.
 
 ### 2. Worker-Container deployen
@@ -46,6 +59,7 @@ dann in `docker-compose.yml` anpassen:
 - `networks`: externes Netzwerk auf das des Paperless-Stacks setzen
   (`docker network ls`, oft `<stackname>_default`).
 - Volume `/output`: NAS-Share, den du vom Handy/PC erreichst.
+- `RECEIPT_PERSON_TAGS`: deine Personen-Tags eintragen.
 - `.env.example` → `.env` kopieren und `PAPERLESS_TOKEN` +
   `ANTHROPIC_API_KEY` eintragen (API-Key: https://console.anthropic.com).
 
@@ -67,8 +81,7 @@ Docker-Netz. Stattdessen aus dem Paperless-Container:
      - /volume1/docker/paperless/scripts:/scripts:ro
    environment:
      PAPERLESS_POST_CONSUME_SCRIPT: /scripts/post-consume.sh
-     RECEIPT_TRIGGER_TAG: abrechnung
-     RECEIPT_FULL_TAG: abrechnung-komplett
+     RECEIPT_TRIGGER_TAG: Auslagen
      RECEIPT_WORKER_URL: http://receipt-worker:5000/process
    ```
 
@@ -78,8 +91,8 @@ Docker-Netz. Stattdessen aus dem Paperless-Container:
 
 ### 4. Testlauf
 
-Einen markierten Bon scannen (oder ein Foto in den Consume-Ordner legen) und
-den Tag vergeben. Im Log nachsehen:
+Einen Bon scannen (oder ein Foto in den Consume-Ordner legen) und die Tags
+vergeben. Im Log nachsehen:
 
 ```
 docker logs -f receipt-worker
@@ -95,15 +108,23 @@ ID frei wählen), dann in der `docker-compose.yml` setzen:
 HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/<deine-id>"
 ```
 
-Der Worker schickt JSON mit `message`, `betrag_se`, `offen_gesamt`,
+Der Worker schickt JSON mit `message`, `person`, `betrag_auslagen`,
 `plausibel` und `unsichere_positionen` – direkt verwendbar in einer
 `notify`-Action: `{{ trigger.json.message }}`.
 
-## Umschalten auf lokales Modell (Option C)
+## Alternative Provider
 
-Ollama-Container auf dem NAS starten, Vision-Modell ziehen
-(`ollama pull qwen2.5vl:7b`), dann im Worker nur die Provider-Zeilen
-umstellen:
+**Azure Document Intelligence** (Option B) eignet sich, wenn ein Vision-LLM
+bei bestimmten Bons Erkennungsprobleme hatte – DI ist ein spezialisiertes
+Kassenbon-OCR-Modell statt eines allgemeinen Vision-Modells:
+
+```yaml
+PROVIDER: "azure_di"
+AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
+AZURE_DI_KEY: "${AZURE_DI_KEY}"
+```
+
+**Lokales Modell via Ollama** (Option C):
 
 ```yaml
 PROVIDER: "openai"
@@ -112,9 +133,9 @@ OPENAI_MODEL: "qwen2.5vl:7b"
 ```
 
 Container neu starten – sonst ändert sich nichts. Zum Qualitätsvergleich:
-denselben Bon einmal mit jedem Provider verarbeiten (Dokument-ID aus dem
-State-File `.receipt_worker_state.json` unter `processed_ids` entfernen,
-sonst wird er als Duplikat übersprungen).
+denselben Bon einmal mit jedem Provider verarbeiten (in Paperless den Tag
+`Verarbeitet` vom Dokument entfernen, sonst wird es als Duplikat
+übersprungen).
 
 ## Build & Hosting über GitHub
 
@@ -132,14 +153,15 @@ im Code noch im Image enthalten. Die Datei `.env` ist per `.gitignore`
 vom Commit ausgeschlossen.
 
 Eigene Tag-Namen (z. B. andere Sprachen oder Kürzel) werden nicht im Code
-geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_FULL_TAG` im
-Paperless-Stack konfiguriert; der Excel-Dateiname über `OPEN_FILENAME`.
+geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /
+`RECEIPT_PROCESSED_TAG` konfiguriert; der Excel-Basisdateiname über
+`OPEN_FILENAME`.
 
 ## Dateien
 
 | Datei | Zweck |
 |---|---|
-| `worker.py` | Worker: HTTP-Endpoint, Paperless-Download, LLM-Extraktion, Excel |
+| `worker.py` | Worker: HTTP-Endpoints, Paperless-Zugriff, Extraktion, Excel |
 | `Dockerfile` | Container-Image (Python 3.12 + poppler) |
 | `docker-compose.yml` | Stack-Definition (GHCR-Image, Build-Fallback) |
 | `post-consume.sh` | Hook-Script für den Paperless-Container |
@@ -150,13 +172,18 @@ Paperless-Stack konfiguriert; der Excel-Dateiname über `OPEN_FILENAME`.
 
 ## Hinweise
 
-- **Duplikatschutz:** Verarbeitete Dokument-IDs stehen im State-File im
-  Output-Ordner; ein erneuter Consume desselben Dokuments wird übersprungen.
+- **Duplikatschutz:** über den Paperless-Tag `Verarbeitet` (siehe oben) –
+  keine lokale Datenbank oder State-Datei nötig.
+- **Nebenläufigkeit:** eine Lock-Datei im Output-Ordner
+  (`.receipt_worker.lock`) stellt sicher, dass immer nur eine Verarbeitung
+  gleichzeitig läuft (verhindert doppelte Verarbeitung, wenn Hook und
+  Backlog-Scan sich zeitlich überschneiden).
 - **Kosten (Option A):** Ein Bon ≈ 1 Bild + ~500 Output-Token → deutlich
   unter 1 Cent pro Beleg mit `claude-sonnet-4-6`. Sparsamer:
-  `claude-haiku-4-5-20251001` (bei Handschrift etwas schwächer).
-- **Mehrseitige Bons:** bis `MAX_PAGES` (Standard 4) Seiten werden übertragen.
+  `claude-haiku-4-5-20251001`.
+- **Mehrseitige Bons:** bis `MAX_PAGES` (Standard 4) Seiten werden übertragen
+  (gilt für Anthropic/OpenAI; Azure DI verarbeitet das Originaldokument ohne
+  dieses Limit).
 - **Excel offen halten:** Die Datei nicht dauerhaft in Excel geöffnet lassen –
   der Worker schreibt direkt hinein; bei gleichzeitigem Zugriff kann das
-  Speichern fehlschlagen (steht dann im Log, Beleg per State-File-Eintrag
-  entfernen und neu consumen).
+  Speichern fehlschlagen (steht dann im Log).

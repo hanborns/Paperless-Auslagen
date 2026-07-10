@@ -9,7 +9,8 @@ Homeserver mit Docker (z. B. mit Portainer). Geschätzte Dauer: 45–60 Minuten 
 
 - Paperless-ngx läuft als Docker-Stack (Portainer) auf dem NAS
 - SSH-Zugang zum NAS oder Portainer-Zugriff
-- Anthropic API-Key (Schritt 2)
+- Anthropic API-Key (Schritt 2) – oder ein Azure-Document-Intelligence-Key,
+  siehe „Alternative Provider" weiter unten
 - Ein NAS-Share für die Excel-Ausgabe, den du vom PC/Handy erreichst
 
 ---
@@ -63,19 +64,19 @@ Notiere dir:
 
 ## Schritt 3: Paperless vorbereiten (Web-UI, 5 Minuten)
 
-1. **Zwei Tags anlegen:** *Verwaltung → Tags → Neu* (Kleinschreibung;
-   andere Namen gehen, müssen dann in Schritt 6 identisch eingetragen
-   werden):
-   - `abrechnung` → nur die handschriftlich markierten Positionen
-     („R" = ganze Menge, Zahl = Anteil) gehen in die Abrechnung
-   - `abrechnung-komplett` → der **gesamte Beleg** geht in die
-     Abrechnung, keine Markierungen nötig (hat Vorrang, falls beide
-     Tags gesetzt sind)
+1. **Tags anlegen:** *Verwaltung → Tags → Neu* (Namen frei wählbar, müssen
+   dann in Schritt 6 identisch eingetragen werden):
+   - `Auslagen` – Trigger-Tag, löst die Verarbeitung überhaupt erst aus.
+   - Je Person, die abgerechnet wird, ein eigener Tag, z. B. `Rose`. Ein
+     Beleg mit `Auslagen` + `Rose` landet in der Excel-Datei für Rose; ohne
+     passenden Personen-Tag in der gemeinsamen Standarddatei; mit mehreren
+     passenden Personen-Tags in jeder betroffenen Datei.
+   - `Verarbeitet` wird vom Worker automatisch angelegt und gesetzt – hier
+     nichts zu tun, außer du willst ihn schon vorab anlegen.
 2. Optional, wenn der Scanner nicht selbst taggt: *Verwaltung → Workflows* →
    je Tag ein Workflow mit Trigger „Konsumierung gestartet" und Filter auf
-   einen dedizierten Consume-Unterordner (z. B. `consume/abrechnung/`
-   und `consume/abrechnung-komplett/`), Aktion: entsprechenden Tag
-   zuweisen. Dann steuert der Ablageordner das Tagging.
+   einen dedizierten Consume-Unterordner (z. B. `consume/rose/`), Aktion:
+   entsprechende Tags zuweisen. Dann steuert der Ablageordner das Tagging.
 
 ---
 
@@ -101,10 +102,16 @@ mkdir -p /volume1/shares/abrechnung
 ### 5a) `docker-compose.yml` anpassen
 
 Öffne `/volume1/docker/receipt-worker/docker-compose.yml` und trage die
-Werte aus Schritt 1 ein:
+Werte aus Schritt 1 sowie deine Personen-Tags ein:
 
 ```yaml
 PAPERLESS_URL: "http://<paperless-container-name>:8000"
+```
+
+```yaml
+RECEIPT_TRIGGER_TAG: "Auslagen"
+RECEIPT_PERSON_TAGS: "Rose"        # kommasepariert, z. B. "Rose,Anna"
+RECEIPT_PROCESSED_TAG: "Verarbeitet"
 ```
 
 ```yaml
@@ -200,10 +207,15 @@ services:
     environment:
       # ... bestehende Variablen ...
       PAPERLESS_POST_CONSUME_SCRIPT: /scripts/post-consume.sh
-      RECEIPT_TRIGGER_TAG: abrechnung
-      RECEIPT_FULL_TAG: abrechnung-komplett
+      RECEIPT_TRIGGER_TAG: Auslagen
       RECEIPT_WORKER_URL: http://receipt-worker:5000/process
 ```
+
+`RECEIPT_TRIGGER_TAG` muss hier denselben Wert haben wie im
+Worker-Stack (Schritt 5a) – das Script nutzt ihn nur als günstigen
+Vorfilter, bevor es den Worker überhaupt anspricht. Personen-Tags und der
+Verarbeitet-Tag werden nur vom Worker gebraucht, hier ist nichts weiter
+einzutragen.
 
 ### 6c) Paperless neu deployen
 
@@ -226,31 +238,29 @@ docker exec <paperless-container-name> printenv PAPERLESS_POST_CONSUME_SCRIPT
 
 ## Schritt 7: End-to-End-Test
 
-1. Einen echten Bon mit der Markierungs-Konvention versehen:
-   - **R** neben Position = komplette Menge für Abrechnungspartei
-   - **Zahl** neben Position = dieser Anteil für Abrechnungspartei
-   - **nichts** = gehört dir
-2. Scannen und in Paperless mit Tag `abrechnung` konsumieren lassen.
-   Danach zusätzlich einen unmarkierten Bon mit Tag
-   `abrechnung-komplett` testen – dessen „Abrechnungsbetrag" muss der
-   Bon-Endsumme entsprechen.
-3. Log beobachten:
+1. Einen echten Bon scannen und in Paperless mit den Tags `Auslagen` +
+   deinem Personen-Tag (z. B. `Rose`) konsumieren lassen.
+2. Log beobachten:
 
    ```bash
    docker logs -f receipt-worker
    ```
 
    Erwartete Zeilen: `Verarbeite Paperless-Dokument …` →
-   `Fertig: <blattname> | Anteil x,xx € | offen gesamt …`
-4. `Abrechnung_offen.xlsx` im Output-Share öffnen und prüfen:
+   `Fertig: <blattname> (<person>) | Auslagenbetrag x,xx € …`
+3. In Paperless prüfen, dass der Tag `Verarbeitet` gesetzt wurde.
+4. `Abrechnung_offen_Rose.xlsx` (bzw. der Dateiname für deine Person) im
+   Output-Share öffnen und prüfen:
    - Summenblatt vorn mit offenem Gesamtbetrag
-   - Beleg-Blatt mit Positionen; gelbe Spalte „Anteil" = gelesene
-     Handschrift-Werte (bei Bedarf korrigieren, Beträge rechnen sich neu)
-   - Kontrollzeile unten: extrahierte Positionssumme vs. gedruckte
-     Bon-Summe (grün = plausibel, rot + roter Blatt-Reiter = prüfen)
+   - Beleg-Blatt mit Positionen; gelbe Spalte „Anteil abrechnen" ist
+     standardmäßig die volle Menge – bei Bedarf reduzieren, Beträge rechnen
+     sich per Formel neu
+   - Kontrollzeilen unten: extrahierte Positionssumme bzw. Abrechnungsbetrag
+     vs. gedruckte Bon-Summe (grün = plausibel, rot + roter Blatt-Reiter =
+     prüfen)
 
 Beim ersten Beleg alle Positionen einmal gegen den Papier-Bon prüfen, um
-ein Gefühl für die Lesequalität deiner Handschrift zu bekommen.
+ein Gefühl für die Erkennungsqualität zu bekommen.
 
 ---
 
@@ -273,7 +283,7 @@ ein Gefühl für die Lesequalität deiner Handschrift zu bekommen.
    HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/beleg-erfasst"
    ```
 
-Der Webhook liefert zusätzlich `betrag_se`, `offen_gesamt`, `plausibel`,
+Der Webhook liefert zusätzlich `person`, `betrag_auslagen`, `plausibel`,
 `unsichere_positionen`, `sheet` und `doc_id` – nutzbar für ein
 Dashboard-Kärtchen oder bedingte Warn-Notifications
 (`{{ trigger.json.plausibel == false }}`).
@@ -282,17 +292,22 @@ Dashboard-Kärtchen oder bedingte Warn-Notifications
 
 ## Betrieb
 
-**Abrechnungsrunde abschließen:** Nach der Überweisung
-`Abrechnung_offen.xlsx` umbenennen (z. B.
-`Abrechnung_2026-07_beglichen.xlsx`). Der nächste Beleg legt
-automatisch eine neue Datei an; der offene Zähler startet bei 0.
+**Abrechnungsrunde abschließen:** Nach der Überweisung die passende
+`Abrechnung_offen[_<Person>].xlsx` umbenennen (z. B.
+`Abrechnung_2026-07_Rose_beglichen.xlsx`). Der nächste Beleg für diese
+Person legt automatisch eine neue Datei an.
 
-**Fehlerhafter Beleg / erneut verarbeiten:** Im Output-Share liegt
-`.receipt_worker_state.json`. Die Dokument-ID aus `processed_ids`
-entfernen, dann das Dokument in Paperless erneut konsumieren (oder den
-Worker direkt anstoßen):
+**Fehlerhafter Beleg / erneut verarbeiten:** In Paperless beim Dokument den
+Tag `Verarbeitet` entfernen. Der nächste periodische Scan (Standard alle
+30 Minuten, `SCAN_INTERVAL_MINUTES`) holt es automatisch nach – oder sofort
+per Hand:
 
 ```bash
+# Option 1: Backlog-Scan sofort anstoßen (verarbeitet alle offenen Belege)
+docker exec <paperless-container-name> \
+  curl -s -X POST http://receipt-worker:5000/scan
+
+# Option 2: gezielt ein einzelnes Dokument
 docker exec <paperless-container-name> \
   curl -s -X POST http://receipt-worker:5000/process \
   -H 'Content-Type: application/json' -d '{"document_id": 4711}'
@@ -307,7 +322,27 @@ Beleg kann wie oben erneut angestoßen werden.
 
 ---
 
-## Umschalten auf lokales Modell (Option C)
+## Alternative Provider
+
+### Azure Document Intelligence (Option B)
+
+Sinnvoll, wenn ein Vision-LLM bei bestimmten Bons Erkennungsprobleme hatte –
+Azure DI ist ein spezialisiertes Kassenbon-OCR-Modell statt eines
+allgemeinen Vision-Modells.
+
+1. Im Azure-Portal eine „Document Intelligence"-Ressource anlegen, Endpoint
+   und Key notieren.
+2. In der Worker-Compose:
+
+   ```yaml
+   PROVIDER: "azure_di"
+   AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
+   AZURE_DI_KEY: "${AZURE_DI_KEY}"
+   ```
+
+3. `AZURE_DI_KEY` in `.env` eintragen, `docker compose up -d`.
+
+### Lokales Modell via Ollama (Option C)
 
 1. Ollama als Container auf dem NAS deployen (im selben Netz oder mit
    erreichbarer Adresse), Modell ziehen: `ollama pull qwen2.5vl:7b`
@@ -321,10 +356,11 @@ Beleg kann wie oben erneut angestoßen werden.
 
 3. `docker compose up -d` – mehr ändert sich nicht.
 
-**Qualitätsvergleich:** Denselben Beleg einmal pro Provider verarbeiten
-(ID vorher aus `processed_ids` entfernen) und die beiden Blätter gegen den
-Papier-Bon vergleichen. Rechne bei reiner CPU-Inferenz mit
-mehreren Minuten pro Beleg und voller CPU-Last während der Verarbeitung.
+**Qualitätsvergleich zwischen Providern:** Denselben Beleg einmal pro
+Provider verarbeiten (in Paperless vorher den Tag `Verarbeitet` entfernen,
+sonst wird er als Duplikat übersprungen) und die Blätter gegen den
+Papier-Bon vergleichen. Rechne bei reiner CPU-Ollama-Inferenz mit mehreren
+Minuten pro Beleg und voller CPU-Last während der Verarbeitung.
 
 ---
 
@@ -333,8 +369,9 @@ mehreren Minuten pro Beleg und voller CPU-Last während der Verarbeitung.
 | Symptom | Ursache / Lösung |
 |---|---|
 | Health-Check aus Paperless-Container schlägt fehl | Falscher Netzwerkname in Worker-Compose; `docker network ls` prüfen |
-| Kein Log-Eintrag nach Consume | Tag stimmt nicht mit `RECEIPT_TRIGGER_TAG`/`RECEIPT_FULL_TAG` überein; Env-Variablen im Paperless-Container prüfen (`printenv`); Recreate statt Restart durchgeführt? |
-| `401` im Worker-Log | `PAPERLESS_TOKEN` oder `ANTHROPIC_API_KEY` falsch |
+| Kein Log-Eintrag nach Consume | Tag stimmt nicht mit `RECEIPT_TRIGGER_TAG` überein; Env-Variablen im Paperless-Container prüfen (`printenv`); Recreate statt Restart durchgeführt? |
+| `401` im Worker-Log | `PAPERLESS_TOKEN` oder Provider-API-Key falsch |
 | `Permission denied` beim Script | `chmod +x post-consume.sh` fehlt |
 | Excel-Blatt fehlt trotz Log „Fertig" | Falscher Output-Mount; `docker inspect receipt-worker` → Mounts prüfen |
 | Summen-Differenz auf jedem Beleg | Scan-Qualität prüfen (Auflösung ≥ 200 dpi, Bon glatt auflegen) |
+| Dokument bleibt trotz Tag unverarbeitet | Personen-Tag nicht in `RECEIPT_PERSON_TAGS`? Läuft bereits eine andere Verarbeitung (Lock-Datei `.receipt_worker.lock` im Output-Ordner)? |

@@ -1,31 +1,25 @@
 #!/usr/bin/env bash
 # Paperless-ngx Post-Consume-Hook
-# Prüft die Tags des Dokuments und stößt den Receipt-Worker an.
-# Läuft IM Paperless-Container – braucht nur curl (ist im Image enthalten).
+# Prüft günstig (ohne API-Call) den Trigger-Tag und stößt den Receipt-Worker
+# an. Läuft IM Paperless-Container – braucht nur curl (ist im Image enthalten).
 #
-# Zwei Modi:
-#   RECEIPT_FULL_TAG    -> kompletter Beleg geht in die Abrechnung
-#   RECEIPT_TRIGGER_TAG -> nur handschriftlich markierte Positionen
-#                          ("R" = ganze Menge, Zahl = Anteil)
-# Sind beide Tags gesetzt, gewinnt der Komplett-Tag.
+# Personen-Zuordnung, Verarbeitet-Status und Duplikatschutz entscheidet der
+# Worker selbst anhand der aktuellen Paperless-Tags des Dokuments – hier wird
+# nur grob vorgefiltert, damit unbeteiligte Dokumente den Worker gar nicht
+# erst wecken.
 
-TRIGGER_TAG="${RECEIPT_TRIGGER_TAG:-abrechnung}"
-FULL_TAG="${RECEIPT_FULL_TAG:-abrechnung-komplett}"
+TRIGGER_TAG="${RECEIPT_TRIGGER_TAG:-Auslagen}"
 WORKER_URL="${RECEIPT_WORKER_URL:-http://receipt-worker:5000/process}"
 
 # DOCUMENT_TAGS ist eine kommaseparierte Liste der Tag-Namen
-if echo ",${DOCUMENT_TAGS}," | grep -qi ",${FULL_TAG},"; then
-    PAYLOAD="{\"document_id\": ${DOCUMENT_ID}, \"full\": true}"
-elif echo ",${DOCUMENT_TAGS}," | grep -qi ",${TRIGGER_TAG},"; then
-    PAYLOAD="{\"document_id\": ${DOCUMENT_ID}, \"full\": false}"
-else
+if ! echo ",${DOCUMENT_TAGS}," | grep -qi ",${TRIGGER_TAG},"; then
     exit 0
 fi
 
 # Kurzer Timeout, Worker arbeitet asynchron weiter – Konsumierung nicht blockieren
 curl -m 10 -s -X POST "${WORKER_URL}" \
     -H "Content-Type: application/json" \
-    -d "${PAYLOAD}" \
+    -d "{\"document_id\": ${DOCUMENT_ID}}" \
     >> /tmp/receipt-post-consume.log 2>&1 || true
 
 exit 0

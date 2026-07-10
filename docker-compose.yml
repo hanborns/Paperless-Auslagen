@@ -25,6 +25,13 @@ services:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
       ANTHROPIC_MODEL: "claude-sonnet-4-6"
 
+      # --- Option B (Azure Document Intelligence) – zum Umschalten nur
+      # diese Zeilen einkommentieren und Option A auskommentieren: ---
+      # PROVIDER: "azure_di"
+      # AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
+      # AZURE_DI_KEY: "${AZURE_DI_KEY}"
+      # AZURE_DI_MODEL: "prebuilt-receipt"
+
       # --- Option C (lokal via Ollama) – zum Umschalten nur diese 3 Zeilen: ---
       # PROVIDER: "openai"
       # OPENAI_BASE_URL: "http://ollama:11434"
@@ -32,18 +39,19 @@ services:
 
       # --- Ausgabe ---
       OUTPUT_DIR: "/output"
-      OPEN_FILENAME: "Abrechnung_offen.xlsx"
+      OPEN_FILENAME: "Abrechnung_offen.xlsx"    # Basisname; je Personen-Tag wird "_<Person>" angehängt
 
-      # --- Tags (müssen zu den Tags in Paperless passen, siehe post-consume.sh) ---
-      # Diese beiden Variablen gehören in den PAPERLESS-Stack, nicht hierher –
-      # hier nur als Referenz dokumentiert:
-      #   RECEIPT_TRIGGER_TAG: abrechnung           (markierte Positionen)
-      #   RECEIPT_FULL_TAG: abrechnung-komplett     (ganzer Beleg)
+      # --- Tags (in Paperless anlegen; RECEIPT_TRIGGER_TAG muss zusätzlich
+      # im PAPERLESS-Stack gesetzt sein, siehe post-consume.sh) ---
+      RECEIPT_TRIGGER_TAG: "Auslagen"           # Dokument wird überhaupt verarbeitet
+      RECEIPT_PERSON_TAGS: "Rose"               # Allowlist, kommasepariert, z. B. "Rose,Anna"
+      RECEIPT_PROCESSED_TAG: "Verarbeitet"      # Duplikatschutz; Tag entfernen = Reprocessing
+      SCAN_INTERVAL_MINUTES: "30"               # periodischer Backlog-Scan (z. B. E-Mail-Import)
 
       # --- Optional: Home-Assistant-Webhook ---
       # HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/DEINE_WEBHOOK_ID"
     volumes:
-      # Zielordner für die Excel-Datei – auf einen vom Handy/PC erreichbaren
+      # Zielordner für die Excel-Datei(en) – auf einen vom Handy/PC erreichbaren
       # NAS-Share mounten:
       - /volume1/shares/abrechnung:/output
     networks:
