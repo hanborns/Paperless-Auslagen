@@ -9,8 +9,8 @@ Homeserver mit Docker (z. B. mit Portainer). Geschätzte Dauer: 45–60 Minuten 
 
 - Paperless-ngx läuft als Docker-Stack (Portainer) auf dem NAS
 - SSH-Zugang zum NAS oder Portainer-Zugriff
-- Anthropic API-Key (Schritt 2) – oder ein Azure-Document-Intelligence-Key,
-  siehe „Alternative Provider" weiter unten
+- Azure-Document-Intelligence-Key (Schritt 2, Default-Provider) – oder ein
+  Anthropic API-Key, siehe „Alternative Provider" weiter unten
 - Ein NAS-Share für die Excel-Ausgabe, den du vom PC/Handy erreichst
 
 ---
@@ -45,7 +45,21 @@ Notiere dir:
 
 ## Schritt 2: API-Zugänge anlegen
 
-**Anthropic API-Key:**
+**Azure Document Intelligence Key (Default-Provider):**
+
+1. Im Azure-Portal eine „Document Intelligence"-Ressource anlegen (Region
+   frei wählbar, Tarif „Free" reicht zum Testen).
+2. Unter *Keys and Endpoint* Key 1 sowie den Endpoint notieren. Sicher
+   ablegen (z. B. Vaultwarden).
+
+**Paperless API-Token:**
+
+1. Paperless-Web-UI öffnen → Profilsymbol oben rechts → **API-Token**
+   (bzw. *Mein Profil* → Token generieren).
+2. Token kopieren.
+
+**Optional – Anthropic API-Key** (nur nötig bei `PROVIDER=anthropic`, siehe
+„Alternative Provider" weiter unten):
 
 1. https://console.anthropic.com öffnen, Konto anlegen (unabhängig von der
    Claude-Pro-Subscription).
@@ -53,12 +67,6 @@ Notiere dir:
    sehr lange – ein Bon kostet deutlich unter 1 Cent).
 3. Unter *API Keys* einen Key erzeugen, beginnt mit `sk-ant-`. Sicher
    ablegen (z. B. Vaultwarden), er wird nur einmal angezeigt.
-
-**Paperless API-Token:**
-
-1. Paperless-Web-UI öffnen → Profilsymbol oben rechts → **API-Token**
-   (bzw. *Mein Profil* → Token generieren).
-2. Token kopieren.
 
 ---
 
@@ -115,6 +123,10 @@ RECEIPT_PROCESSED_TAG: "Verarbeitet"
 ```
 
 ```yaml
+AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
+```
+
+```yaml
 volumes:
   - /volume1/shares/abrechnung:/output      # dein Output-Share
 ```
@@ -131,12 +143,12 @@ networks:
 ```bash
 cd /volume1/docker/receipt-worker
 cp .env.example .env
-nano .env    # PAPERLESS_TOKEN und ANTHROPIC_API_KEY eintragen
+nano .env    # PAPERLESS_TOKEN und AZURE_DI_KEY eintragen
 chmod 600 .env
 ```
 
 (Alternativ in Portainer: Stack-Editor → *Environment variables* →
-`PAPERLESS_TOKEN` und `ANTHROPIC_API_KEY` dort setzen, dann keine
+`PAPERLESS_TOKEN` und `AZURE_DI_KEY` dort setzen, dann keine
 `.env` nötig.)
 
 ### 5c) Deployen
@@ -174,7 +186,7 @@ docker ps | grep receipt-worker
 
 # Ist er aus dem Paperless-Container erreichbar? (wichtig: gleiches Netz)
 docker exec <paperless-container-name> curl -s http://receipt-worker:5000/health
-# Erwartet: {"provider":"anthropic","status":"ok"}
+# Erwartet: {"provider":"azure_di","status":"ok"}
 ```
 
 Wenn `curl` im Paperless-Container fehlt oder der Health-Check fehlschlägt:
@@ -249,7 +261,7 @@ docker exec <paperless-container-name> printenv PAPERLESS_POST_CONSUME_SCRIPT
    Erwartete Zeilen: `Verarbeite Paperless-Dokument …` →
    `Fertig: <blattname> (<person>) | Auslagenbetrag x,xx € …`
 3. In Paperless prüfen, dass der Tag `Verarbeitet` gesetzt wurde.
-4. `Abrechnung_offen_Rose.xlsx` (bzw. der Dateiname für deine Person) im
+4. `Auslagen_offen_Rose.xlsx` (bzw. der Dateiname für deine Person) im
    Output-Share öffnen und prüfen:
    - Summenblatt vorn mit offenem Gesamtbetrag
    - Beleg-Blatt mit Positionen; gelbe Spalte „Anteil abrechnen" ist
@@ -293,8 +305,8 @@ Dashboard-Kärtchen oder bedingte Warn-Notifications
 ## Betrieb
 
 **Abrechnungsrunde abschließen:** Nach der Überweisung die passende
-`Abrechnung_offen[_<Person>].xlsx` umbenennen (z. B.
-`Abrechnung_2026-07_Rose_beglichen.xlsx`). Der nächste Beleg für diese
+`Auslagen_offen[_<Person>].xlsx` umbenennen (z. B.
+`Auslagen_2026-07_Rose_beglichen.xlsx`). Der nächste Beleg für diese
 Person legt automatisch eine neue Datei an.
 
 **Fehlerhafter Beleg / erneut verarbeiten:** In Paperless beim Dokument den
@@ -324,23 +336,25 @@ Beleg kann wie oben erneut angestoßen werden.
 
 ## Alternative Provider
 
-### Azure Document Intelligence (Option B)
+Standard ist **Azure Document Intelligence** (s. Schritt 2 und 5) – ein
+spezialisiertes Kassenbon-OCR-Modell statt eines allgemeinen Vision-Modells.
 
-Sinnvoll, wenn ein Vision-LLM bei bestimmten Bons Erkennungsprobleme hatte –
-Azure DI ist ein spezialisiertes Kassenbon-OCR-Modell statt eines
-allgemeinen Vision-Modells.
+### Anthropic Claude (Option B)
 
-1. Im Azure-Portal eine „Document Intelligence"-Ressource anlegen, Endpoint
-   und Key notieren.
+Sinnvoll, wenn Azure DI bei einem bestimmten Bon-Layout Erkennungsprobleme
+hat.
+
+1. Anthropic API-Key anlegen, siehe „Optional – Anthropic API-Key" in
+   Schritt 2.
 2. In der Worker-Compose:
 
    ```yaml
-   PROVIDER: "azure_di"
-   AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
-   AZURE_DI_KEY: "${AZURE_DI_KEY}"
+   PROVIDER: "anthropic"
+   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+   ANTHROPIC_MODEL: "claude-sonnet-4-6"
    ```
 
-3. `AZURE_DI_KEY` in `.env` eintragen, `docker compose up -d`.
+3. `ANTHROPIC_API_KEY` in `.env` eintragen, `docker compose up -d`.
 
 ### Lokales Modell via Ollama (Option C)
 

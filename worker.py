@@ -4,9 +4,10 @@ Receipt-Worker für Paperless-ngx
 --------------------------------
 Nimmt per HTTP eine Paperless-Dokument-ID entgegen (Post-Consume-Hook) oder
 holt sich unverarbeitete Dokumente per periodischem Scan selbst, lädt den
-Beleg, extrahiert alle Kaufpositionen per Vision-LLM (Anthropic, OpenAI-
-kompatibel/Ollama) oder per Azure Document Intelligence, und pflegt pro
-Person eine Excel-Datei mit einem Blatt pro Beleg und einem Summenblatt.
+Beleg, extrahiert alle Kaufpositionen per Azure Document Intelligence
+(Default) oder per Vision-LLM (Anthropic, OpenAI-kompatibel/Ollama), und
+pflegt pro Person eine Excel-Datei mit einem Blatt pro Beleg und einem
+Summenblatt.
 
 Tags in Paperless steuern den Ablauf (Namen per Environment konfigurierbar):
   - Trigger-Tag (Default "Auslagen")     -> Dokument wird verarbeitet
@@ -46,7 +47,7 @@ from PIL import Image
 PAPERLESS_URL = os.environ["PAPERLESS_URL"].rstrip("/")   # z. B. http://paperless-webserver:8000
 PAPERLESS_TOKEN = os.environ["PAPERLESS_TOKEN"]
 
-PROVIDER = os.environ.get("PROVIDER", "anthropic")        # "anthropic" | "openai" | "azure_di"
+PROVIDER = os.environ.get("PROVIDER", "azure_di")         # "azure_di" | "anthropic" | "openai"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "http://ollama:11434").rstrip("/")
@@ -58,7 +59,7 @@ AZURE_DI_API_VERSION = os.environ.get("AZURE_DI_API_VERSION", "2024-11-30")
 AZURE_DI_CONFIDENCE_THRESHOLD = float(os.environ.get("AZURE_DI_CONFIDENCE_THRESHOLD", "0.7"))
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
-OPEN_FILENAME = os.environ.get("OPEN_FILENAME", "Abrechnung_offen.xlsx")
+OPEN_FILENAME = os.environ.get("OPEN_FILENAME", "Auslagen_offen.xlsx")
 LOCK_FILE = OUTPUT_DIR / ".receipt_worker.lock"
 
 RECEIPT_TRIGGER_TAG = os.environ.get("RECEIPT_TRIGGER_TAG", "Auslagen")

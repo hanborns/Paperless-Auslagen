@@ -16,13 +16,13 @@ Person, falls mehrere Personen abgerechnet werden.
      landet der Beleg in der gemeinsamen Standarddatei. Mit mehreren
      passenden Personen-Tags landet er in jeder betroffenen Datei.
 2. **Fertig.** Der Worker extrahiert alle Positionen vollständig (Anteil =
-   Menge) und legt in `Abrechnung_offen[_<Person>].xlsx` ein neues Blatt an;
+   Menge) und legt in `Auslagen_offen[_<Person>].xlsx` ein neues Blatt an;
    das Summenblatt zeigt den offenen Gesamtbetrag.
 3. **Nur ein Teil sollte abgerechnet werden?** Direkt in der gelben Spalte
    „Anteil abrechnen" im Excel-Blatt korrigieren – der Betrag rechnet sich
    per Formel neu.
 4. **Nach der Überweisung:** Datei umbenennen (z. B.
-   `Abrechnung_2026-07_beglichen.xlsx`). Beim nächsten Beleg für diese
+   `Auslagen_2026-07_beglichen.xlsx`). Beim nächsten Beleg für diese
    Person wird automatisch eine frische Datei mit Summenblatt angelegt.
 
 Rote Blatt-Reiter bedeuten: extrahierte Positionssumme weicht von der
@@ -60,11 +60,15 @@ dann in `docker-compose.yml` anpassen:
   (`docker network ls`, oft `<stackname>_default`).
 - Volume `/output`: NAS-Share, den du vom Handy/PC erreichst.
 - `RECEIPT_PERSON_TAGS`: deine Personen-Tags eintragen.
+- `AZURE_DI_ENDPOINT`: Endpoint deiner Azure-Document-Intelligence-Ressource
+  eintragen.
 - `.env.example` → `.env` kopieren und `PAPERLESS_TOKEN` +
-  `ANTHROPIC_API_KEY` eintragen (API-Key: https://console.anthropic.com).
+  `AZURE_DI_KEY` eintragen (Azure Portal → Document Intelligence → Keys).
 
-Dann: `docker compose up -d --build` (oder als Portainer-Stack mit
-Build-from-Repository/Upload).
+Dann: `docker compose pull && docker compose up -d` – die Compose zieht das
+fertige Multi-Arch-Image aus der GitHub Container Registry
+(`ghcr.io/hanborns/paperless-auslagen`), ein lokaler Build ist nicht nötig
+(oder als Portainer-Stack ohne Repository-Build deployen).
 
 Test: `curl http://<nas-ip>:...` entfällt – der Worker lauscht nur im
 Docker-Netz. Stattdessen aus dem Paperless-Container:
@@ -114,14 +118,17 @@ Der Worker schickt JSON mit `message`, `person`, `betrag_auslagen`,
 
 ## Alternative Provider
 
-**Azure Document Intelligence** (Option B) eignet sich, wenn ein Vision-LLM
-bei bestimmten Bons Erkennungsprobleme hatte – DI ist ein spezialisiertes
-Kassenbon-OCR-Modell statt eines allgemeinen Vision-Modells:
+Standard ist **Azure Document Intelligence** (Option A, s. o.) – ein
+spezialisiertes Kassenbon-OCR-Modell statt eines allgemeinen Vision-Modells.
+Alternativ:
+
+**Anthropic Claude** (Option B), z. B. wenn Azure DI bei einem bestimmten
+Bon-Layout schwächelt:
 
 ```yaml
-PROVIDER: "azure_di"
-AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
-AZURE_DI_KEY: "${AZURE_DI_KEY}"
+PROVIDER: "anthropic"
+ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+ANTHROPIC_MODEL: "claude-sonnet-4-6"
 ```
 
 **Lokales Modell via Ollama** (Option C):
@@ -178,8 +185,11 @@ geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /
   (`.receipt_worker.lock`) stellt sicher, dass immer nur eine Verarbeitung
   gleichzeitig läuft (verhindert doppelte Verarbeitung, wenn Hook und
   Backlog-Scan sich zeitlich überschneiden).
-- **Kosten (Option A):** Ein Bon ≈ 1 Bild + ~500 Output-Token → deutlich
-  unter 1 Cent pro Beleg mit `claude-sonnet-4-6`. Sparsamer:
+- **Kosten (Option A, Azure Document Intelligence):** Abrechnung pro
+  analysiertem Dokument nach Azure-Pricing für `prebuilt-receipt` (aktuelle
+  Preise im Azure-Portal); kein Rasterisieren/Bild-Resize nötig.
+- **Kosten (Option B, Anthropic):** Ein Bon ≈ 1 Bild + ~500 Output-Token →
+  deutlich unter 1 Cent pro Beleg mit `claude-sonnet-4-6`. Sparsamer:
   `claude-haiku-4-5-20251001`.
 - **Mehrseitige Bons:** bis `MAX_PAGES` (Standard 4) Seiten werden übertragen
   (gilt für Anthropic/OpenAI; Azure DI verarbeitet das Originaldokument ohne
