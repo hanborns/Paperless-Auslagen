@@ -48,7 +48,15 @@ services:
       RECEIPT_PROCESSED_TAG: "Verarbeitet"      # Duplikatschutz; Tag entfernen = Reprocessing
       SCAN_INTERVAL_MINUTES: "30"               # periodischer Backlog-Scan (z. B. E-Mail-Import)
 
-      # --- Optional: Home-Assistant-Webhook ---
+      # --- Optional: Benachrichtigung ---
+      # Option A (Default): ntfy.sh – kein eigener Server nötig, öffentlicher
+      # Dienst https://ntfy.sh; Thema sollte zufällig/unerratbar sein (dient
+      # als "Passwort", da jeder das Thema abonnieren kann):
+      # NTFY_TOPIC: "paperless-auslagen-<zufälliger-string>"
+      # NTFY_URL: "https://ntfy.sh"            # oder eigener/selbst gehosteter Server
+      # NTFY_TOKEN: "${NTFY_TOKEN}"            # optional, für Auth am eigenen Server
+
+      # Option B: Home-Assistant-Webhook (alternativ oder zusätzlich zu ntfy)
       # HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/DEINE_WEBHOOK_ID"
     volumes:
       # Zielordner für die Excel-Datei(en) – auf einen vom Handy/PC erreichbaren

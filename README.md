@@ -103,16 +103,30 @@ docker logs -f receipt-worker
 # bzw. die Datei receipt-worker.log im Output-Ordner
 ```
 
-### 5. Optional: Home-Assistant-Benachrichtigung
+### 5. Optional: Benachrichtigung per ntfy.sh
 
-In HA eine Automation mit Webhook-Trigger anlegen (Trigger-Typ „Webhook",
-ID frei wählen), dann in der `docker-compose.yml` setzen:
+Default-Kanal ist [ntfy.sh](https://ntfy.sh) – kein eigener Server nötig,
+einfach ein (möglichst unerratbares, da öffentlich abonnierbares) Thema
+wählen, in der [ntfy-App](https://ntfy.sh/app) abonnieren und in der
+`docker-compose.yml` setzen:
+
+```yaml
+NTFY_TOPIC: "paperless-auslagen-<zufälliger-string>"
+```
+
+Optional: `NTFY_URL` für einen selbst gehosteten ntfy-Server (statt des
+öffentlichen `https://ntfy.sh`), `NTFY_TOKEN` falls dieser Auth verlangt.
+
+**Alternative/Ergänzung – Home-Assistant-Webhook:** In HA eine Automation
+mit Webhook-Trigger anlegen (Trigger-Typ „Webhook", ID frei wählen), dann
+zusätzlich oder statt ntfy setzen:
 
 ```yaml
 HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/<deine-id>"
 ```
 
-Der Worker schickt JSON mit `message`, `person`, `betrag_auslagen`,
+Beide Kanäle bekommen dieselbe Nachricht; ntfy nur den Text (`message`),
+der HA-Webhook zusätzlich JSON mit `person`, `betrag_auslagen`,
 `plausibel` und `unsichere_positionen` – direkt verwendbar in einer
 `notify`-Action: `{{ trigger.json.message }}`.
 
@@ -154,10 +168,19 @@ und bei Version-Tags (`v1.0.0` …) automatisch ein Multi-Arch-Image
 eingebauten `GITHUB_TOKEN` – es müssen keine persönlichen Tokens oder
 Secrets im Repository hinterlegt werden.
 
+**Fertiges Image direkt ziehen** (kein eigener Build nötig):
+
+```bash
+docker pull ghcr.io/hanborns/paperless-auslagen:latest
+```
+
+Versionierte Tags (z. B. `:2.1.0`, `:2.1`, `:2`) entstehen automatisch aus
+GitHub-Releases; `docker-compose.yml` nutzt standardmäßig `:latest`.
+
 Alle instanzspezifischen Werte (API-Keys, Tokens, Tag-Namen, Dateiname,
-Webhook-URL) werden zur Laufzeit per Environment gesetzt und sind weder
-im Code noch im Image enthalten. Die Datei `.env` ist per `.gitignore`
-vom Commit ausgeschlossen.
+ntfy-Thema, Webhook-URL) werden zur Laufzeit per Environment gesetzt und
+sind weder im Code noch im Image enthalten. Die Datei `.env` ist per
+`.gitignore` vom Commit ausgeschlossen.
 
 Eigene Tag-Namen (z. B. andere Sprachen oder Kürzel) werden nicht im Code
 geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /

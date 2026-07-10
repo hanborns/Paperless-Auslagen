@@ -67,7 +67,12 @@ RECEIPT_PERSON_TAGS = [t.strip() for t in os.environ.get("RECEIPT_PERSON_TAGS", 
 RECEIPT_PROCESSED_TAG = os.environ.get("RECEIPT_PROCESSED_TAG", "Verarbeitet")
 SCAN_INTERVAL_MINUTES = int(os.environ.get("SCAN_INTERVAL_MINUTES", "30"))
 
-HA_WEBHOOK_URL = os.environ.get("HA_WEBHOOK_URL", "")     # optional
+# --- Benachrichtigung (beides optional, unabhängig voneinander nutzbar) ---
+NTFY_URL = os.environ.get("NTFY_URL", "https://ntfy.sh").rstrip("/")   # Default | eigener Server
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")             # leer = deaktiviert
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")             # optional, für Auth (Access Token)
+HA_WEBHOOK_URL = os.environ.get("HA_WEBHOOK_URL", "")     # optional, Alternative/Ergänzung zu ntfy
+
 MAX_PAGES = int(os.environ.get("MAX_PAGES", "4"))
 MAX_IMG_WIDTH = int(os.environ.get("MAX_IMG_WIDTH", "1100"))
 
@@ -552,15 +557,39 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
 
 
 # ----------------------------------------------------------------------------
-# Benachrichtigung (optional)
+# Benachrichtigung (optional; ntfy.sh ist der Default-Kanal, Home-Assistant-
+# Webhook bleibt als Alternative/Ergänzung nutzbar – beide unabhängig)
 # ----------------------------------------------------------------------------
-def notify(payload):
-    if not HA_WEBHOOK_URL:
-        return
+def notify_ntfy(payload):
+    message = payload.get("message", "")
+    is_error = payload.get("event") == "receipt_error"
+    is_warning = payload.get("plausibel") is False or payload.get("inkonsistente_zeilen")
+    headers = {
+        "Title": "Paperless-Auslagen",
+        "Priority": "urgent" if is_error else "default",
+        "Tags": "rotating_light" if is_error else ("warning" if is_warning else "receipt"),
+    }
+    if NTFY_TOKEN:
+        headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
+    try:
+        requests.post(f"{NTFY_URL}/{NTFY_TOPIC}", data=message.encode("utf-8"),
+                      headers=headers, timeout=15)
+    except Exception as e:  # noqa: BLE001
+        log.warning("ntfy-Notification fehlgeschlagen: %s", e)
+
+
+def notify_ha(payload):
     try:
         requests.post(HA_WEBHOOK_URL, json=payload, timeout=15)
     except Exception as e:  # noqa: BLE001
         log.warning("HA-Notification fehlgeschlagen: %s", e)
+
+
+def notify(payload):
+    if NTFY_TOPIC:
+        notify_ntfy(payload)
+    if HA_WEBHOOK_URL:
+        notify_ha(payload)
 
 
 # ----------------------------------------------------------------------------

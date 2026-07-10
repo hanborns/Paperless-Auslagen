@@ -154,7 +154,11 @@ chmod 600 .env
 ### 5c) Deployen
 
 Die Compose nutzt standardmäßig das fertige Image aus der GitHub
-Container Registry (`ghcr.io/hanborns/paperless-auslagen:latest`).
+Container Registry – kein eigener Build nötig:
+
+```bash
+docker pull ghcr.io/hanborns/paperless-auslagen:latest
+```
 
 **Variante SSH:**
 
@@ -276,7 +280,27 @@ ein Gefühl für die Erkennungsqualität zu bekommen.
 
 ---
 
-## Schritt 8 (optional): Home-Assistant-Benachrichtigung
+## Schritt 8 (optional): Benachrichtigung
+
+### ntfy.sh (Default-Kanal)
+
+1. [ntfy-App](https://ntfy.sh/app) auf dem Handy installieren (oder Web-App
+   nutzen) und ein eigenes, unerratbares Thema abonnieren (z. B.
+   `paperless-auslagen-x7k2m9` – jeder, der das Thema kennt, kann mitlesen,
+   da `ntfy.sh` standardmäßig öffentlich ist).
+2. Im Worker-Stack ergänzen und Container neu starten:
+
+   ```yaml
+   NTFY_TOPIC: "paperless-auslagen-x7k2m9"
+   ```
+
+3. Optional bei selbst gehostetem ntfy-Server: `NTFY_URL` (statt
+   `https://ntfy.sh`) und `NTFY_TOKEN` (falls Auth verlangt wird) setzen.
+
+Der Worker schickt den reinen Nachrichtentext (`message`), inkl. ⚠-Hinweisen
+bei Summen-Differenzen oder Fehlern (dann mit Priorität „urgent").
+
+### Alternative/Ergänzung: Home-Assistant-Webhook
 
 1. In HA eine Automation anlegen, Trigger-Typ **Webhook**, eigene ID
    vergeben (z. B. `beleg-erfasst`), Methode POST, nur lokales Netzwerk.
@@ -289,7 +313,8 @@ ein Gefühl für die Erkennungsqualität zu bekommen.
      message: "{{ trigger.json.message }}"
    ```
 
-3. Im Worker-Stack ergänzen und Container neu starten:
+3. Im Worker-Stack ergänzen und Container neu starten (zusätzlich zu oder
+   statt `NTFY_TOPIC`):
 
    ```yaml
    HA_WEBHOOK_URL: "http://homeassistant.local:8123/api/webhook/beleg-erfasst"
