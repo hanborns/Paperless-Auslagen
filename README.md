@@ -134,6 +134,20 @@ der HA-Webhook zusätzlich JSON mit `person`, `betrag_auslagen`,
 
 Standard ist **Azure Document Intelligence** (Option A, s. o.) – ein
 spezialisiertes Kassenbon-OCR-Modell statt eines allgemeinen Vision-Modells.
+
+**Feintuning für deutsche Bons (nur Option A):**
+
+- `AZURE_DI_LOCALE` (Standard `de-DE`): Sprach-Hint für OCR und Analyse –
+  verbessert die Erkennung von Dezimalkommas (`1,99`), deutschen
+  Datumsformaten (`dd.mm.yyyy`) und EUR-Beträgen. Leer setzen
+  (`AZURE_DI_LOCALE: ""`) aktiviert die automatische Spracherkennung –
+  sinnvoll, wenn auch nicht-deutsche Belege verarbeitet werden (ein
+  falscher Hint kann die Genauigkeit verschlechtern).
+- `AZURE_DI_FEATURES` (kommasepariert, Standard leer): optionale
+  Analyse-Add-ons, z. B. `ocrHighResolution` für sehr klein gedruckte
+  Bons. **Achtung:** Add-ons berechnet Azure pro Seite extra – nur bei
+  hartnäckigen Lesefehlern aktivieren.
+
 Alternativ:
 
 **Anthropic Claude** (Option B), z. B. wenn Azure DI bei einem bestimmten
@@ -210,7 +224,9 @@ geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /
   Backlog-Scan sich zeitlich überschneiden).
 - **Kosten (Option A, Azure Document Intelligence):** Abrechnung pro
   analysiertem Dokument nach Azure-Pricing für `prebuilt-receipt` (aktuelle
-  Preise im Azure-Portal); kein Rasterisieren/Bild-Resize nötig.
+  Preise im Azure-Portal); kein Rasterisieren/Bild-Resize nötig. Der
+  `AZURE_DI_LOCALE`-Hint ist kostenlos; Add-ons über `AZURE_DI_FEATURES`
+  (z. B. `ocrHighResolution`) kosten pro Seite extra.
 - **Kosten (Option B, Anthropic):** Ein Bon ≈ 1 Bild + ~500 Output-Token →
   deutlich unter 1 Cent pro Beleg mit `claude-sonnet-4-6`. Sparsamer:
   `claude-haiku-4-5-20251001`.

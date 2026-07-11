@@ -124,6 +124,15 @@ RECEIPT_PROCESSED_TAG: "Verarbeitet"
 
 ```yaml
 AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
+AZURE_DI_LOCALE: "de-DE"    # Sprach-Hint (Standard); leer = Auto-Erkennung
+```
+
+Optional, nur falls Zahlen/Kleingedrucktes trotz `de-DE`-Hint falsch
+gelesen werden (kostenpflichtiges Azure-Add-on, wird pro Seite extra
+berechnet):
+
+```yaml
+AZURE_DI_FEATURES: "ocrHighResolution"
 ```
 
 ```yaml
