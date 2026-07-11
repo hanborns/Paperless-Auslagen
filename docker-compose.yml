@@ -25,6 +25,8 @@ services:
       AZURE_DI_ENDPOINT: "https://<dein-resource-name>.cognitiveservices.azure.com"
       AZURE_DI_KEY: "${AZURE_DI_KEY}"
       AZURE_DI_MODEL: "prebuilt-receipt"
+      AZURE_DI_LOCALE: "de-DE"                  # Sprach-Hint für OCR/Analyse; leer = Auto-Erkennung (z. B. bei gemischtsprachigen Bons)
+      # AZURE_DI_FEATURES: "ocrHighResolution"  # OCR in höherer Auflösung für Kleingedrucktes – kostenpflichtiges Add-on, nur bei Lesefehlern aktivieren
 
       # --- Option B (Anthropic API) – zum Umschalten nur diese Zeilen
       # einkommentieren und Option A auskommentieren: ---

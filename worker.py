@@ -57,6 +57,9 @@ AZURE_DI_KEY = os.environ.get("AZURE_DI_KEY", "")
 AZURE_DI_MODEL = os.environ.get("AZURE_DI_MODEL", "prebuilt-receipt")
 AZURE_DI_API_VERSION = os.environ.get("AZURE_DI_API_VERSION", "2024-11-30")
 AZURE_DI_CONFIDENCE_THRESHOLD = float(os.environ.get("AZURE_DI_CONFIDENCE_THRESHOLD", "0.7"))
+AZURE_DI_LOCALE = os.environ.get("AZURE_DI_LOCALE", "de-DE")  # leer = Auto-Erkennung
+# Kommasepariert, z. B. "ocrHighResolution" (kostenpflichtiges Add-on)
+AZURE_DI_FEATURES = [f.strip() for f in os.environ.get("AZURE_DI_FEATURES", "").split(",") if f.strip()]
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 OPEN_FILENAME = os.environ.get("OPEN_FILENAME", "Auslagen_offen.xlsx")
@@ -290,9 +293,15 @@ def parse_llm_json(text):
 # Azure Document Intelligence (prebuilt-receipt)
 # ----------------------------------------------------------------------------
 def call_azure_di(doc_bytes):
+    params = {"api-version": AZURE_DI_API_VERSION}
+    if AZURE_DI_LOCALE:
+        params["locale"] = AZURE_DI_LOCALE
+    if AZURE_DI_FEATURES:
+        params["features"] = ",".join(AZURE_DI_FEATURES)
     resp = requests.post(
         f"{AZURE_DI_ENDPOINT}/documentintelligence/documentModels/"
-        f"{AZURE_DI_MODEL}:analyze?api-version={AZURE_DI_API_VERSION}",
+        f"{AZURE_DI_MODEL}:analyze",
+        params=params,
         headers={
             "Ocp-Apim-Subscription-Key": AZURE_DI_KEY,
             "Content-Type": "application/json",
