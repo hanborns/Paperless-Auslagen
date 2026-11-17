@@ -48,6 +48,9 @@ import plausibility
 # ----------------------------------------------------------------------------
 PAPERLESS_URL = os.environ["PAPERLESS_URL"].rstrip("/")   # z. B. http://paperless-webserver:8000
 PAPERLESS_TOKEN = os.environ["PAPERLESS_TOKEN"]
+# Adresse, unter der Paperless im BROWSER erreichbar ist (für die Links im
+# Excel), z. B. https://paperless.example.de – leer = PAPERLESS_URL
+PAPERLESS_PUBLIC_URL = (os.environ.get("PAPERLESS_PUBLIC_URL", "").strip() or PAPERLESS_URL).rstrip("/")
 
 PROVIDER = os.environ.get("PROVIDER", "azure_di")         # "azure_di" | "anthropic" | "openai"
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -79,6 +82,11 @@ RECEIPT_PROCESSED_TAG = os.environ.get("RECEIPT_PROCESSED_TAG", "Verarbeitet")
 # Positionen, die nie abgerechnet werden (Anteil 0), z. B. "Extra Bacon,Extra Speck".
 # Teiltext-Vergleich ohne Groß-/Kleinschreibung – möglichst spezifisch wählen.
 RECEIPT_EXCLUDE_ITEMS = [t.strip() for t in os.environ.get("RECEIPT_EXCLUDE_ITEMS", "").split(",") if t.strip()]
+# Kaufdatum: weicht das Erstellt-Datum in Paperless vom ermittelten Kaufdatum
+# ab, korrigiert der Worker es (mit Notiz) und setzt diesen Tag zur Sichtung.
+# Den Tag bekommen auch Belege, deren Datum unsicher ist. Leer = kein Tag.
+RECEIPT_DATE_CHECK_TAG = os.environ.get("RECEIPT_DATE_CHECK_TAG", "Datum prüfen").strip()
+PAPERLESS_FIX_CREATED = os.environ.get("PAPERLESS_FIX_CREATED", "true").lower() in ("1", "true", "yes", "ja")
 SCAN_INTERVAL_MINUTES = int(os.environ.get("SCAN_INTERVAL_MINUTES", "30"))
 
 # --- Benachrichtigung (beides optional, unabhängig voneinander nutzbar) ---
@@ -194,6 +202,51 @@ def mark_processed(doc_id):
         "method": "modify_tags",
         "parameters": {"add_tags": [resolve_tag_id(RECEIPT_PROCESSED_TAG)], "remove_tags": []},
     })
+
+
+def paperless_document_url(doc_id):
+    return f"{PAPERLESS_PUBLIC_URL}/documents/{doc_id}/details"
+
+
+def add_tag(doc_id, tag_name):
+    paperless_post("/api/documents/bulk_edit/", {
+        "documents": [doc_id],
+        "method": "modify_tags",
+        "parameters": {"add_tags": [resolve_tag_id(tag_name)], "remove_tags": []},
+    })
+
+
+def add_note(doc_id, text):
+    paperless_post(f"/api/documents/{doc_id}/notes/", {"note": text})
+
+
+def sync_purchase_date(doc_id, meta, datum, hinweis, sicher):
+    """Gleicht das Erstellt-Datum in Paperless mit dem Kaufdatum ab. Gibt
+    True zurück, wenn in Paperless etwas geändert wurde. Fehler hier brechen
+    die Verarbeitung nicht ab (Excel ist zu diesem Zeitpunkt geschrieben)."""
+    created = str(meta.get("created") or meta.get("created_date") or "")[:10]
+    changed = False
+    try:
+        if datum and sicher and created and created != datum and PAPERLESS_FIX_CREATED:
+            resp = requests.patch(
+                f"{PAPERLESS_URL}/api/documents/{doc_id}/",
+                headers={"Authorization": f"Token {PAPERLESS_TOKEN}"},
+                json={"created": datum}, timeout=30)
+            if resp.status_code >= 400:
+                raise RuntimeError(f"Paperless API {resp.status_code}: {resp.text[:500]}")
+            add_note(doc_id, f"receipt-worker: Erstellt-Datum von {created} auf {datum} korrigiert "
+                             f"(Kaufdatum laut Bon{': ' + hinweis if hinweis else ''}).")
+            log.info("Dokument %s: Erstellt-Datum %s -> %s korrigiert", doc_id, created, datum)
+            changed = True
+        elif not sicher:
+            add_note(doc_id, f"receipt-worker: {hinweis or 'Kaufdatum unsicher'} "
+                             f"(Erstellt-Datum {created or '?'} unverändert).")
+            changed = True
+        if changed and RECEIPT_DATE_CHECK_TAG:
+            add_tag(doc_id, RECEIPT_DATE_CHECK_TAG)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Dokument %s: Datumsabgleich mit Paperless fehlgeschlagen: %s", doc_id, e)
+    return changed
 
 
 def download_document(doc_id):
@@ -432,6 +485,18 @@ def excel_path_for_person(person):
     return OUTPUT_DIR / f"{stem}_{person}{suffix}"
 
 
+SUM_HEADS = ["Datum", "Markt", "Beleg-Blatt", "Betrag", "Paperless"]
+LINK_FONT = Font(color="0563C1", underline="single")
+
+
+def set_link(cell, doc_id, text=None):
+    """Zelle mit direktem Link auf das Paperless-Dokument."""
+    cell.value = text or f"Paperless #{doc_id}"
+    cell.hyperlink = paperless_document_url(doc_id)
+    cell.font = LINK_FONT
+    return cell
+
+
 def create_workbook(path):
     wb = Workbook()
     ws = wb.active
@@ -441,13 +506,14 @@ def create_workbook(path):
     ws["D1"] = "=SUM(D4:D500)"
     ws["D1"].font = Font(bold=True, size=13)
     ws["D1"].number_format = EUR_FMT
-    for col, head in enumerate(["Datum", "Markt", "Beleg-Blatt", "Betrag"], start=1):
+    for col, head in enumerate(SUM_HEADS, start=1):
         c = ws.cell(row=3, column=col, value=head)
         c.font = HEADER_FONT
     ws.column_dimensions["A"].width = 12
     ws.column_dimensions["B"].width = 22
     ws.column_dimensions["C"].width = 26
     ws.column_dimensions["D"].width = 14
+    ws.column_dimensions["E"].width = 14
     wb.save(path)
     log.info("Neue Abrechnungsdatei angelegt: %s", path)
 
@@ -488,6 +554,9 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
     for col in "BCDEF":
         sheet.column_dimensions[col].width = 15
     sheet.column_dimensions["G"].width = 26
+    # Direkter Link zum Beleg in Paperless (Dokumentnummer = Suchbegriff)
+    sheet.column_dimensions["H"].width = 18
+    set_link(sheet.cell(row=1, column=8), doc_id)
 
     betrag_auslagen = 0.0
     inkonsistente = 0
@@ -504,13 +573,19 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
         c = sheet.cell(row=row, column=4, value=zsum); c.number_format = EUR_FMT
         ac = sheet.cell(row=row, column=5, value=anteil)
         ac.fill = CHECK_FILL  # editierbare Zelle hervorheben
-        fc = sheet.cell(row=row, column=6, value=f"=E{row}*C{row}")
+        # Betrag = Anteil × Einzelpreis. Ist die Zeile inkonsistent (Menge ×
+        # Preis ≠ Zeilensumme, meist Fehllesung von Menge/Preis), stimmt der
+        # gedruckte Betrag eher: dann anteilig aus der Zeilensumme. Als Formel,
+        # damit eine Korrektur von Menge/Preis im Blatt sofort durchschlägt.
+        fc = sheet.cell(row=row, column=6, value=(
+            f"=IF(AND(B{row}<>0,ABS(B{row}*C{row}-D{row})>0.015),"
+            f"E{row}/B{row}*D{row},E{row}*C{row})"))
         fc.number_format = EUR_FMT
         # Zeilen-Konsistenz: Menge × Einzelpreis muss zur Bon-Zeilensumme passen.
         # Abweichung = Fehllesung von Menge oder Preis -> Auslagenbetrag wäre falsch!
         hinweise = []
         if abs(menge * preis - zsum) > 0.015:
-            hinweise.append("⚠ Menge×Preis ≠ Zeilensumme")
+            hinweise.append("⚠ Menge×Preis ≠ Zeilensumme (Betrag aus Zeilensumme)")
             inkonsistente += 1
         if pos.get("unsicher"):
             hinweise.append("⚠ Position unsicher gelesen")
@@ -521,7 +596,10 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
         if hinweise or korrekturen:
             hc = sheet.cell(row=row, column=7, value=", ".join(hinweise + korrekturen))
             hc.fill = WARN_FILL if hinweise else INFO_FILL
-        betrag_auslagen += round(anteil * preis, 2)
+        if menge and abs(menge * preis - zsum) > 0.015:
+            betrag_auslagen += round(anteil / menge * zsum, 2)
+        else:
+            betrag_auslagen += round(anteil * preis, 2)
         row += 1
 
     last_data_row = row - 1
@@ -584,10 +662,15 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
 
     if plausibel is False or inkonsistente > 0:
         sheet.sheet_properties.tabColor = "FF6666"
-    sheet.cell(row=check_row + 1, column=1,
-               value=f"Quelle: Paperless-Dokument #{doc_id} – {doc_title}")
+    set_link(sheet.cell(row=check_row + 1, column=1), doc_id,
+             f"Quelle: Paperless-Dokument #{doc_id} – {doc_title}")
+    info_row = check_row + 2
     if data.get("quelle"):
-        sheet.cell(row=check_row + 2, column=1, value=f"Erkennung: {data['quelle']}")
+        sheet.cell(row=info_row, column=1, value=f"Erkennung: {data['quelle']}")
+        info_row += 1
+    if data.get("datum_hinweis"):
+        dc = sheet.cell(row=info_row, column=1, value=f"Datum: {data['datum_hinweis']}")
+        dc.fill = WARN_FILL if data["datum_hinweis"].startswith("⚠") else INFO_FILL
 
     # Summenblatt ergänzen
     ws = wb[SUM_SHEET]
@@ -599,6 +682,10 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
     ws.cell(row=srow, column=3, value=sheet.title)
     sc = ws.cell(row=srow, column=4, value=f"='{sheet.title}'!F{total_row}")
     sc.number_format = EUR_FMT
+    if ws.cell(row=3, column=5).value is None:   # ältere Dateien ohne Spalte
+        ws.cell(row=3, column=5, value=SUM_HEADS[4]).font = HEADER_FONT
+        ws.column_dimensions["E"].width = 14
+    set_link(ws.cell(row=srow, column=5), doc_id, f"#{doc_id}")
 
     wb.save(path)
     return round(betrag_auslagen, 2), plausibel, inkonsistente, sheet.title
@@ -668,12 +755,14 @@ def process_document(doc_id):
 
         content, content_type = download_document(doc_id)
         zweitmeinung = False
+        bontext = ""
         if PROVIDER == "azure_di":
             analyze_result = call_azure_di(content)
             dump_debug(doc_id, ".azure.json", payload=analyze_result)
             dump_debug(doc_id, guess_extension(content_type), raw_bytes=content)
             data, info = plausibility.reconcile(normalize_azure_result(analyze_result),
                                                RECEIPT_EXCLUDE_ITEMS)
+            bontext = data.get("_content") or ""
             log.info("Plausibilität Azure: Status %s, Differenz %s, inkonsistente Zeilen %d, "
                      "korrigierte Positionen %d %s", info["status"], info["differenz"],
                      info["inkonsistente_zeilen"], info["korrekturen"], info.get("regeln", ""))
@@ -706,6 +795,14 @@ def process_document(doc_id):
 
         plausibility.apply_shares(data, RECEIPT_EXCLUDE_ITEMS)
 
+        # Kaufdatum = oberstes plausibles Datum auf dem Bon (Azure-Text, sonst
+        # Paperless-OCR); TSE-Signaturen u. ä. zählen nicht.
+        datum, datum_hinweis, datum_sicher = plausibility.pick_purchase_date(
+            bontext or meta.get("content") or "", data.get("datum"), meta.get("added"))
+        if datum:
+            data["datum"] = datum
+        data["datum_hinweis"] = datum_hinweis
+
         unsichere = sum(1 for p in data["positionen"] if p.get("unsicher"))
         korrigierte = sum(1 for p in data["positionen"] if p.get("korrektur"))
         targets = persons or [""]
@@ -728,11 +825,15 @@ def process_document(doc_id):
                 msg += f" 🔧 {korrigierte} Position(en) automatisch korrigiert."
             if zweitmeinung:
                 msg += f" 🤖 Zweitmeinung ({SECOND_OPINION_PROVIDER}) verwendet."
+            if datum_hinweis:
+                msg += f" 📅 {datum_hinweis}."
             notify({"event": "receipt_processed", "person": person, "markt": data.get("markt"),
                     "betrag_auslagen": betrag, "plausibel": plausibel,
                     "unsichere_positionen": unsichere, "inkonsistente_zeilen": inkonsistente,
                     "korrigierte_positionen": korrigierte, "zweitmeinung": zweitmeinung,
                     "sheet": sheet, "doc_id": doc_id, "message": msg})
+
+        sync_purchase_date(doc_id, meta, data.get("datum"), datum_hinweis, datum_sicher)
 
         mark_processed(doc_id)
 

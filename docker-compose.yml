@@ -19,6 +19,7 @@ services:
       # --- Paperless-Zugriff ---
       PAPERLESS_URL: "http://paperless-webserver:8000"   # Service-Name des Paperless-Webservers
       PAPERLESS_TOKEN: "${PAPERLESS_TOKEN}"              # API-Token, siehe README
+      # PAPERLESS_PUBLIC_URL: "https://paperless.example.de"  # Browser-Adresse von Paperless für die Links im Excel (leer = PAPERLESS_URL)
 
       # --- AI-Provider: Option A (Azure Document Intelligence, Default) ---
       PROVIDER: "azure_di"
@@ -52,6 +53,8 @@ services:
       RECEIPT_PERSON_TAGS: "Rose"               # Allowlist, kommasepariert, z. B. "Rose,Anna"
       RECEIPT_PROCESSED_TAG: "Verarbeitet"      # Duplikatschutz; Tag entfernen = Reprocessing
       SCAN_INTERVAL_MINUTES: "30"               # periodischer Backlog-Scan (z. B. E-Mail-Import)
+      RECEIPT_DATE_CHECK_TAG: "Datum prüfen"    # Tag für Belege mit korrigiertem/unsicherem Kaufdatum (leer = kein Tag)
+      # PAPERLESS_FIX_CREATED: "false"          # Erstellt-Datum in Paperless NICHT automatisch aufs Kaufdatum korrigieren (Default: true)
       # RECEIPT_EXCLUDE_ITEMS: "Extra Bacon"    # Positionen nie abrechnen (Anteil 0); Teiltext, kommasepariert – spezifisch wählen ("Bacon" träfe auch "Bacon King")
 
       # --- Optional: Benachrichtigung ---

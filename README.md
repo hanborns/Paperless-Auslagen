@@ -56,6 +56,31 @@ der 🔧-Hinweis nennt die Einzelbeträge und die ursprüngliche Bon-Zeile.
 Extras, die auf `RECEIPT_EXCLUDE_ITEMS` passen, bleiben eigene Zeilen
 (Anteil 0).
 
+**Zweispaltig gelesene Bons (ALDI):** Azure liest bei manchen Scans die
+Betragsspalte getrennt vom Text; Beträge, Stückpreise („6 x 0,89") und
+Gewichtsangaben („0,598 kg × 1,99 EUR/kg") landen dann beim Nachbarartikel.
+Der Worker schiebt sie zurück, wenn die Rechnung danach aufgeht – auch
+anhand von Mengenzeilen, die nur im Rohtext stehen (blasse Stückzahl).
+Ist eine Zeile trotzdem inkonsistent (Menge × Preis ≠ Zeilensumme), rechnet
+die Betrag-Spalte anteilig mit der gedruckten Zeilensumme statt mit dem
+vermutlich falsch gelesenen Preis.
+
+**Kaufdatum:** Stehen mehrere Daten auf dem Bon, gilt das **oberste
+plausible** (nicht nach dem Hinzufügen in Paperless, höchstens ein Jahr
+davor). TSE-Signaturen („Letzte erfolgreiche Signatur", „TSE-Start" …),
+Maschinen-Zeitstempel und Öffnungszeiten zählen nicht; OCR-Varianten wie
+`07,11.2026` werden erkannt, ISO-Daten immer als Jahr-Monat-Tag gelesen.
+Weicht das Erstellt-Datum in Paperless ab, korrigiert der Worker es, hängt
+eine Notiz an und setzt den Tag `Datum prüfen` (`RECEIPT_DATE_CHECK_TAG`);
+den Tag bekommen auch Belege mit unsicherem Datum (dann ohne Korrektur).
+Abschalten der Korrektur: `PAPERLESS_FIX_CREATED=false`.
+
+**Link zum Beleg:** Jedes Beleg-Blatt hat oben rechts (Spalte H) und in
+der Quellzeile einen direkten Link „Paperless #<Nummer>"; das Summenblatt
+führt die Dokumentnummer als Link in Spalte E. Damit die Links im Browser
+funktionieren, `PAPERLESS_PUBLIC_URL` auf die Adresse setzen, unter der du
+Paperless öffnest.
+
 **Verarbeitet-Tag:** Nach erfolgreicher Verarbeitung setzt der Worker den Tag
 `Verarbeitet` (konfigurierbar über `RECEIPT_PROCESSED_TAG`) – das ist der
 Duplikatschutz. Ihn in Paperless zu entfernen lässt den Beleg beim nächsten
@@ -243,7 +268,7 @@ sind weder im Code noch im Image enthalten. Die Datei `.env` ist per
 
 Eigene Tag-Namen (z. B. andere Sprachen oder Kürzel) werden nicht im Code
 geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /
-`RECEIPT_PROCESSED_TAG` konfiguriert; der Excel-Basisdateiname über
+`RECEIPT_PROCESSED_TAG` / `RECEIPT_DATE_CHECK_TAG` konfiguriert; der Excel-Basisdateiname über
 `OPEN_FILENAME`.
 
 ## Dateien

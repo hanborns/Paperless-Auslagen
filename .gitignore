@@ -16,3 +16,6 @@ CLAUDE.md
 # Lokale Testbelege (echte Bons, private Daten – nie committen)
 testdata/
 .pytest_cache/
+
+# Übergabe-Notizen mit echten Bondaten (Repo ist öffentlich)
+receipt-worker-*.md

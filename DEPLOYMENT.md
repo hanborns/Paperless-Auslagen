@@ -114,6 +114,8 @@ Werte aus Schritt 1 sowie deine Personen-Tags ein:
 
 ```yaml
 PAPERLESS_URL: "http://<paperless-container-name>:8000"
+# Adresse, unter der du Paperless im Browser öffnest – für die Links im Excel:
+PAPERLESS_PUBLIC_URL: "https://<deine-paperless-adresse>"
 ```
 
 ```yaml
@@ -122,6 +124,9 @@ RECEIPT_PERSON_TAGS: "Rose"        # kommasepariert, z. B. "Rose,Anna"
 RECEIPT_PROCESSED_TAG: "Verarbeitet"
 # optional: Positionen, die nie abgerechnet werden (Anteil 0), Teiltext, kommasepariert
 # RECEIPT_EXCLUDE_ITEMS: "Extra Bacon,Extra Speck"
+# Kaufdatum-Abgleich (siehe README „Kaufdatum"):
+RECEIPT_DATE_CHECK_TAG: "Datum prüfen"
+# PAPERLESS_FIX_CREATED: "false"   # Erstellt-Datum nicht automatisch korrigieren
 ```
 
 ```yaml
@@ -455,6 +460,9 @@ Minuten pro Beleg und voller CPU-Last während der Verarbeitung.
 | `Permission denied` beim Script | `chmod +x post-consume.sh` fehlt |
 | Excel-Blatt fehlt trotz Log „Fertig" | Falscher Output-Mount; `docker inspect receipt-worker` → Mounts prüfen |
 | Summen-Differenz auf jedem Beleg | Scan-Qualität prüfen (Auflösung ≥ 200 dpi, Bon glatt auflegen) |
+| Link „Paperless #…" im Excel führt ins Leere | `PAPERLESS_PUBLIC_URL` auf die Browser-Adresse von Paperless setzen (Default ist die interne `PAPERLESS_URL`) |
+| Dokument trägt Tag „Datum prüfen" | Worker hat das Erstellt-Datum aufs Kaufdatum korrigiert oder das Datum ist unsicher – Notiz am Dokument lesen, prüfen, Tag entfernen |
+| Blatt-Hinweis „⚠ Menge×Preis ≠ Zeilensumme (Betrag aus Zeilensumme)" | Menge/Preis falsch gelesen; der Betrag wird anteilig aus der gedruckten Zeilensumme berechnet. Menge/Preis korrigieren → Formel rechnet wieder normal |
 | Blatt-Hinweis „🔧 …" | Automatische Plausibilitätskorrektur – Originalwert steht im Hinweis; Summe ging danach exakt auf |
 | „Zweitmeinung fehlgeschlagen" im Blatt | Anthropic-Fehler (Key/Guthaben) – Text im Log; Azure-Ergebnis wurde verwendet |
 | Dokument bleibt trotz Tag unverarbeitet | Personen-Tag nicht in `RECEIPT_PERSON_TAGS`? Läuft bereits eine andere Verarbeitung (Lock-Datei `.receipt_worker.lock` im Output-Ordner)? |
