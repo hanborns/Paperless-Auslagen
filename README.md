@@ -61,6 +61,10 @@ Betragsspalte getrennt vom Text; Beträge, Stückpreise („6 x 0,89") und
 Gewichtsangaben („0,598 kg × 1,99 EUR/kg") landen dann beim Nachbarartikel.
 Der Worker schiebt sie zurück, wenn die Rechnung danach aufgeht – auch
 anhand von Mengenzeilen, die nur im Rohtext stehen (blasse Stückzahl).
+Hat Azure zwei Artikel zu einer Position zusammengezogen, teilt der Worker
+sie auf; ein dabei verlorener Betrag kommt aus dem Rohtext oder – wenn er
+dort unlesbar ist (z. B. „2,4%") und beide Artikel eine eigene
+Artikelnummer haben – aus der Differenz zur Bon-Summe (🔧-Hinweis).
 Ist eine Zeile trotzdem inkonsistent (Menge × Preis ≠ Zeilensumme), rechnet
 die Betrag-Spalte anteilig mit der gedruckten Zeilensumme statt mit dem
 vermutlich falsch gelesenen Preis.

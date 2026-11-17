@@ -158,7 +158,7 @@ def _score(data):
 
 
 def _note(pos, text):
-    pos.setdefault("korrektur", []).append(text)
+    pos.setdefault("korrektur", []).append(" / ".join(text.splitlines()))
 
 
 def _num(value):
@@ -452,44 +452,113 @@ def rule_content_quantities(data, ctx):
 
 
 _AMOUNT_LINE = re.compile(r"^\s*(-?\d+,\d{2})\s*[A-Z]?\s*$")
+# OCR-tolerant: letzte Stelle unlesbar ("2,4%", "2,4?") -> nur Präfix bekannt
+_AMOUNT_FUZZY = re.compile(r"^\s*(\d+),(\d)[^\d\s]\s*[A-Z]?\s*$")
+_CODE_LINE = re.compile(r"^\s*\d{4,8}\s+")
+
+
+def _name_line(lines, name):
+    return next((k for k, line in enumerate(lines) if line.strip().endswith(name)), None)
+
+
+def _amounts_below(lines, idx):
+    """Beträge in den zwei Zeilen unter einer Artikelzeile: [(betrag | None,
+    präfix | None, text)] – präfix für OCR-verstümmelte Beträge wie "2,4%"."""
+    out = []
+    if idx is None:
+        return out
+    for line in lines[idx + 1:idx + 3]:
+        if _CODE_LINE.match(line):
+            break                       # nächster Artikel beginnt
+        m = _AMOUNT_LINE.match(line)
+        if m:
+            out.append((float(m.group(1).replace(",", ".")), None, line.strip()))
+            continue
+        m = _AMOUNT_FUZZY.match(line)
+        if m:
+            out.append((None, f"{m.group(1)}.{m.group(2)}", line.strip()))
+    return out
 
 
 def rule_split_merged_description(data, ctx):
     """Azure hat zwei Artikel zu einer Position zusammengezogen
-    (Description "Bananen Bio\\nClementin Bio 750g") und den Betrag des
-    zweiten verloren. Der zweite Artikel wird eigene Position, sein Betrag
-    kommt aus der Betragszeile direkt unter ihm im Bontext. Ändert die
-    Summe – läuft daher nur über RULES (exakt aufgehen oder verwerfen)."""
-    content_lines = (data.get("_content") or "").split("\n")
+    (Description "Bananen Bio\\nClementin Bio 750g") und einen Betrag
+    verloren. Aufteilung:
+      - der vorhandene Betrag bleibt bei dem Artikel, unter dem er im
+        Bontext steht (sonst beim ersten),
+      - der andere Artikel bekommt den Betrag unter ihm im Bontext. Bei
+        genau zwei Artikeln mit eigener Artikelnummer im Text darf er auch
+        aus der fehlenden Differenz zur Bon-Summe kommen – wenn der Text dort
+        nur einen verstümmelten Betrag ("2,4%" für 2,49) oder einen
+        unpassenden (verrutschten) hat.
+    Ändert die Summe – läuft daher nur über RULES (exakt aufgehen oder
+    verwerfen)."""
+    lines = (data.get("_content") or "").split("\n")
     pos_list, changes, i = data["positionen"], 0, 0
+    bon = data.get("bon_summe")
     while i < len(pos_list):
-        names = [n.strip() for n in (pos_list[i].get("artikel") or "").split("\n") if n.strip()]
+        pos = pos_list[i]
+        names = [n.strip() for n in (pos.get("artikel") or "").split("\n") if n.strip()]
         if len(names) < 2:
             i += 1
             continue
-        neue = []
-        for name in names[1:]:
-            idx = next((k for k, line in enumerate(content_lines) if line.strip().endswith(name)), None)
-            betrag = None
-            if idx is not None:
-                for line in content_lines[idx + 1:idx + 3]:
-                    m = _AMOUNT_LINE.match(line)
-                    if m:
-                        betrag = float(m.group(1).replace(",", "."))
-                        break
+        idx = {n: _name_line(lines, n) for n in names}
+        found = {n: _amounts_below(lines, idx[n]) for n in names}
+        zsum = zeilensumme(pos)
+        # Wem gehört der vorhandene Betrag?
+        owner = next((n for n in names if any(a is not None and abs(a - zsum) <= 0.005
+                                                for a, _, _ in found[n])), names[0])
+        others = [n for n in names if n != owner]
+        missing = None
+        if bon is not None:
+            missing = round(_f(bon) - sum(zeilensumme(p) for p in pos_list), 2)
+        with_codes = all(idx[n] is not None and _CODE_LINE.match(lines[idx[n]]) for n in names)
+
+        neue = {}
+        for n in others:
+            exact = [(a, t) for a, _, t in found[n] if a is not None]
+            fuzzy = [(p, t) for _, p, t in found[n] if p is not None]
+            betrag, quelle = None, None
+            if missing is not None and missing > 0 and len(others) == 1:
+                hit_exact = next((t for a, t in exact if abs(a - missing) <= 0.005), None)
+                hit_fuzzy = next((t for p, t in fuzzy if f"{missing:.2f}".startswith(p)), None)
+                if hit_exact:
+                    betrag, quelle = missing, "aus dem Bontext"
+                elif hit_fuzzy:
+                    betrag, quelle = missing, (f"aus Bon-Summe abgeleitet (Bontext „{hit_fuzzy}“ "
+                                               f"unvollständig gelesen)")
+                elif with_codes:
+                    betrag, quelle = missing, "aus Bon-Summe abgeleitet (im Bontext nicht lesbar)"
+            if betrag is None and exact:
+                betrag, quelle = exact[0][0], "aus dem Bontext"
             if betrag is None:
                 break
-            neue.append({"artikel": name, "menge": 1, "einzelpreis": betrag, "zeilensumme": betrag,
-                         "unsicher": pos_list[i].get("unsicher", False),
-                         "korrektur": [f"von „{names[0]}“ abgetrennt, Betrag {_eur(betrag)} aus dem Bontext"]})
-        if len(neue) != len(names) - 1:
+            neue[n] = (betrag, quelle)
+        if len(neue) != len(others):
             i += 1
             continue
-        pos_list[i]["artikel"] = names[0]
-        _note(pos_list[i], f"Position enthielt mehrere Artikel ({', '.join(names)}) – aufgeteilt")
-        pos_list[i + 1:i + 1] = neue
-        changes += len(neue)
-        i += 1 + len(neue)
+
+        result = []
+        for n in names:
+            if n == owner:
+                pos["artikel"] = n
+                pos.pop("artikel_basis", None)
+                menge = _f(pos.get("menge"), 1) or 1
+                if not row_consistent(pos):
+                    pos["menge"], pos["einzelpreis"] = 1, zsum
+                elif menge == 1:
+                    pos["einzelpreis"] = zsum
+                _note(pos, f"Position enthielt mehrere Artikel ({', '.join(names)}) – aufgeteilt, "
+                           f"Betrag {_eur(zsum)} bleibt bei „{n}“")
+                result.append(pos)
+            else:
+                betrag, quelle = neue[n]
+                result.append({"artikel": n, "menge": 1, "einzelpreis": betrag, "zeilensumme": betrag,
+                               "unsicher": pos.get("unsicher", False),
+                               "korrektur": [f"von „{owner}“ abgetrennt, Betrag {_eur(betrag)} {quelle}"]})
+        pos_list[i:i + 1] = result
+        changes += len(others)
+        i += len(result)
     return changes
 
 

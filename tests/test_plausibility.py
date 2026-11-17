@@ -372,3 +372,29 @@ def test_purchase_date_falls_back_to_extracted():
     assert plausibility.pick_purchase_date("", "2026-11-05", "2026-11-17") == ("2026-11-05", None, True)
     datum, _, sicher = plausibility.pick_purchase_date("", "2016-11-26", "2026-11-17")
     assert datum == "2016-11-26" and sicher is False
+
+
+def test_split_merged_amount_belongs_to_second_and_first_is_garbled():
+    # Betrag des ersten Artikels nur als "2,4%" lesbar, darüber ein verrutschter
+    # Betrag des Vorgängers; der vorhandene Betrag 1,39 gehört zum ZWEITEN.
+    content = ("111111 Knödel\n222222 Paprika 400g\n1,29 A\n2,4%\n"
+               "333333 Salat 125g\n1,39 A\n")
+    data = receipt([_nb("Knödel", 1.29), _nb("Paprika 400g\nSalat 125g", 1.39)], 5.17,
+                   _content=content)
+    out, info = reconcile(data)
+    assert info["status"] == "korrigiert"
+    assert [(p["artikel"], p["zeilensumme"]) for p in out["positionen"]] == [
+        ("Knödel", 1.29), ("Paprika 400g", 2.49), ("Salat 125g", 1.39)]
+    assert "unvollständig gelesen" in out["positionen"][1]["korrektur"][0]
+
+
+def test_split_merged_needs_article_codes_when_amount_unreadable():
+    content = "Paprika 400g\nSalat 125g\n1,39 A\n"
+    data = receipt([_nb("Paprika 400g\nSalat 125g", 1.39)], 3.88, _content=content)
+    out, info = reconcile(data)
+    assert info["status"] == "unklar"
+    content = "222222 Paprika 400g\n333333 Salat 125g\n1,39 A\n"
+    data = receipt([_nb("Paprika 400g\nSalat 125g", 1.39)], 3.88, _content=content)
+    out, info = reconcile(data)
+    assert info["status"] == "korrigiert"
+    assert [p["zeilensumme"] for p in out["positionen"]] == [2.49, 1.39]
