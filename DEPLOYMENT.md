@@ -96,7 +96,7 @@ mkdir -p /volume1/docker/receipt-worker
 
 # ZIP-Inhalt dorthin kopieren (per SMB/File-Station oder scp), danach:
 ls /volume1/docker/receipt-worker
-# Erwartete Dateien: worker.py  Dockerfile  docker-compose.yml
+# Erwartete Dateien: worker.py  plausibility.py  Dockerfile  docker-compose.yml
 #                    post-consume.sh  .env.example  README.md  DEPLOYMENT.md
 
 # Output-Ordner anlegen:
@@ -120,6 +120,8 @@ PAPERLESS_URL: "http://<paperless-container-name>:8000"
 RECEIPT_TRIGGER_TAG: "Auslagen"
 RECEIPT_PERSON_TAGS: "Rose"        # kommasepariert, z. B. "Rose,Anna"
 RECEIPT_PROCESSED_TAG: "Verarbeitet"
+# optional: Positionen, die nie abgerechnet werden (Anteil 0), Teiltext, kommasepariert
+# RECEIPT_EXCLUDE_ITEMS: "Extra Bacon,Extra Speck"
 ```
 
 ```yaml
@@ -390,6 +392,37 @@ hat.
 
 3. `ANTHROPIC_API_KEY` in `.env` eintragen, `docker compose up -d`.
 
+### Zweitmeinung per Claude (Ergänzung zu Option A)
+
+Azure DI bleibt der Provider; Claude wird nur gefragt, wenn das
+Azure-Ergebnis auch nach der automatischen Plausibilitätskorrektur nicht
+aufgeht (Positionen ≠ Bon-Summe oder Zeilen rechnerisch inkonsistent).
+
+1. Anthropic API-Key anlegen, siehe „Optional – Anthropic API-Key" in
+   Schritt 2.
+2. In der Worker-Compose zusätzlich zu Option A:
+
+   ```yaml
+   SECOND_OPINION_PROVIDER: "anthropic"
+   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+   ```
+
+3. `ANTHROPIC_API_KEY` in `.env` eintragen, `docker compose up -d`.
+
+Im Log erscheint pro Beleg eine Zeile `Plausibilität Azure: Status ok |
+korrigiert | unklar …`, bei `unklar` gefolgt von `Zweitmeinung: …`.
+
+### Problem-Belege für die Analyse sammeln
+
+`AZURE_DI_DEBUG_DUMP: "true"` setzen und Worker neu erstellen
+(`docker compose up -d`). Ab dann liegen pro Beleg
+`<Dokument-ID>.azure.json` und das Originaldokument in
+`<Output-Ordner>/.azure_raw/`. Für bereits verarbeitete Belege den Tag
+`Verarbeitet` in Paperless entfernen und `POST /scan` auslösen (Achtung:
+erzeugt ein zusätzliches Blatt, das alte bleibt stehen). Die Dateien
+enthalten vollständige Belegdaten – nach dem Sammeln wieder ausschalten
+und den Ordner leeren.
+
 ### Lokales Modell via Ollama (Option C)
 
 1. Ollama als Container auf dem NAS deployen (im selben Netz oder mit
@@ -422,4 +455,6 @@ Minuten pro Beleg und voller CPU-Last während der Verarbeitung.
 | `Permission denied` beim Script | `chmod +x post-consume.sh` fehlt |
 | Excel-Blatt fehlt trotz Log „Fertig" | Falscher Output-Mount; `docker inspect receipt-worker` → Mounts prüfen |
 | Summen-Differenz auf jedem Beleg | Scan-Qualität prüfen (Auflösung ≥ 200 dpi, Bon glatt auflegen) |
+| Blatt-Hinweis „🔧 …" | Automatische Plausibilitätskorrektur – Originalwert steht im Hinweis; Summe ging danach exakt auf |
+| „Zweitmeinung fehlgeschlagen" im Blatt | Anthropic-Fehler (Key/Guthaben) – Text im Log; Azure-Ergebnis wurde verwendet |
 | Dokument bleibt trotz Tag unverarbeitet | Personen-Tag nicht in `RECEIPT_PERSON_TAGS`? Läuft bereits eine andere Verarbeitung (Lock-Datei `.receipt_worker.lock` im Output-Ordner)? |

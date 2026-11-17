@@ -12,3 +12,7 @@ receipt-worker.log
 
 # Memory-File
 CLAUDE.md
+
+# Lokale Testbelege (echte Bons, private Daten – nie committen)
+testdata/
+.pytest_cache/

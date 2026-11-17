@@ -27,6 +27,9 @@ services:
       AZURE_DI_MODEL: "prebuilt-receipt"
       AZURE_DI_LOCALE: "de-DE"                  # Sprach-Hint für OCR/Analyse; leer = Auto-Erkennung (z. B. bei gemischtsprachigen Bons)
       # AZURE_DI_FEATURES: "ocrHighResolution"  # OCR in höherer Auflösung für Kleingedrucktes – kostenpflichtiges Add-on, nur bei Lesefehlern aktivieren
+      # AZURE_DI_DEBUG_DUMP: "true"             # Azure-Rohantwort + Originalbeleg in <Output>/.azure_raw/ ablegen (zum Analysieren von Problem-Belegen)
+      # SECOND_OPINION_PROVIDER: "anthropic"    # Zweitmeinung per Claude, NUR wenn Azure auch nach Auto-Korrektur nicht aufgeht; braucht ANTHROPIC_API_KEY (s. Option B)
+      # ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"  # für die Zweitmeinung (PROVIDER bleibt azure_di)
 
       # --- Option B (Anthropic API) – zum Umschalten nur diese Zeilen
       # einkommentieren und Option A auskommentieren: ---
@@ -49,6 +52,7 @@ services:
       RECEIPT_PERSON_TAGS: "Rose"               # Allowlist, kommasepariert, z. B. "Rose,Anna"
       RECEIPT_PROCESSED_TAG: "Verarbeitet"      # Duplikatschutz; Tag entfernen = Reprocessing
       SCAN_INTERVAL_MINUTES: "30"               # periodischer Backlog-Scan (z. B. E-Mail-Import)
+      # RECEIPT_EXCLUDE_ITEMS: "Extra Bacon"    # Positionen nie abrechnen (Anteil 0); Teiltext, kommasepariert – spezifisch wählen ("Bacon" träfe auch "Bacon King")
 
       # --- Optional: Benachrichtigung ---
       # Option A (Default): ntfy.sh – kein eigener Server nötig, öffentlicher

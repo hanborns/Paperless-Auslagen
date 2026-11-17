@@ -20,13 +20,32 @@ Person, falls mehrere Personen abgerechnet werden.
    das Summenblatt zeigt den offenen Gesamtbetrag.
 3. **Nur ein Teil sollte abgerechnet werden?** Direkt in der gelben Spalte
    „Anteil abrechnen" im Excel-Blatt korrigieren – der Betrag rechnet sich
-   per Formel neu.
+   per Formel neu. Positionen, die grundsätzlich nie abgerechnet werden
+   (z. B. ein Extra-Belag nur für dich), trägst du in
+   `RECEIPT_EXCLUDE_ITEMS` ein (kommasepariert, Teiltext ohne
+   Groß-/Kleinschreibung, z. B. `"Extra Bacon,Extra Speck"`): Sie bekommen
+   automatisch Anteil 0 und den Hinweis „➖ nicht abgerechnet"; die
+   Kontrollzeile rechnet sie aus der Bon-Summe heraus. Begriffe spezifisch
+   wählen – `Bacon` allein träfe auch einen „Bacon King".
 4. **Nach der Überweisung:** Datei umbenennen (z. B.
    `Auslagen_2026-07_beglichen.xlsx`). Beim nächsten Beleg für diese
    Person wird automatisch eine frische Datei mit Summenblatt angelegt.
 
 Rote Blatt-Reiter bedeuten: extrahierte Positionssumme weicht von der
 gedruckten Bon-Summe ab → Blatt kurz gegenprüfen.
+
+**Plausibilitätskontrolle (Azure DI):** Vor dem Schreiben prüft der Worker,
+ob die erkannten Positionen zur Bon-Summe passen und jede Zeile
+Menge × Einzelpreis = Zeilensumme erfüllt. Passt es nicht, probiert er
+typische Erkennungsfehler durch – z. B. Menü-Komponenten, die doppelt
+gezählt wurden (Burger King: Menü bleibt als Pauschalbetrag, Komponenten
+wandern in den Artikelnamen), in einer Zeile vermischte Netto-/Brutto-Beträge
+oder als eigene Position erkannte Mengenzeilen („2 x 0,99", Aldi). Eine
+Korrektur wird **nur übernommen, wenn danach alles exakt aufgeht**; sie
+steht dann blau hinterlegt mit 🔧 und dem Originalwert in der
+Hinweis-Spalte. Geht es auch so nicht auf, kann optional eine Zweitmeinung
+per Claude eingeholt werden (siehe „Zweitmeinung" unten) – sonst bleibt das
+Azure-Ergebnis mit ⚠-Markierung stehen.
 
 **Verarbeitet-Tag:** Nach erfolgreicher Verarbeitung setzt der Worker den Tag
 `Verarbeitet` (konfigurierbar über `RECEIPT_PROCESSED_TAG`) – das ist der
@@ -148,6 +167,23 @@ spezialisiertes Kassenbon-OCR-Modell statt eines allgemeinen Vision-Modells.
   Bons. **Achtung:** Add-ons berechnet Azure pro Seite extra – nur bei
   hartnäckigen Lesefehlern aktivieren.
 
+- `AZURE_DI_DEBUG_DUMP` (Standard aus): `true` legt pro Beleg die
+  Rohantwort von Azure DI und das Originaldokument unter
+  `<Output-Ordner>/.azure_raw/<Dokument-ID>.*` ab. Gedacht zum Sammeln
+  problematischer Belege, um die Plausibilitätskontrolle zu verbessern
+  (Nachstellen lokal mit `python tools/replay.py`). Enthält vollständige
+  Belegdaten – nach dem Sammeln wieder ausschalten.
+
+**Zweitmeinung (nur Option A):** `SECOND_OPINION_PROVIDER: "anthropic"`
+(plus `ANTHROPIC_API_KEY`, optional `ANTHROPIC_MODEL`) schickt einen Beleg
+**nur dann** zusätzlich an Claude, wenn das Azure-Ergebnis auch nach der
+automatischen Korrektur nicht aufgeht. Das Claude-Ergebnis wird nur
+übernommen, wenn es selbst exakt aufgeht und zur von Azure gelesenen
+Bon-Summe passt; im Blatt steht dann „Erkennung: Zweitmeinung …", die
+Benachrichtigung enthält 🤖. Fehler bei der Zweitmeinung (z. B. kein
+Guthaben) brechen die Verarbeitung nicht ab – dann gilt das
+Azure-Ergebnis. `"openai"` nutzt stattdessen die `OPENAI_*`-Einstellungen.
+
 Alternativ:
 
 **Anthropic Claude** (Option B), z. B. wenn Azure DI bei einem bestimmten
@@ -206,6 +242,9 @@ geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /
 | Datei | Zweck |
 |---|---|
 | `worker.py` | Worker: HTTP-Endpoints, Paperless-Zugriff, Extraktion, Excel |
+| `plausibility.py` | Plausibilitätskontrolle + automatische Korrektur der Positionen |
+| `tests/` | pytest-Suite (läuft im CI vor dem Image-Build) |
+| `tools/replay.py` | Plausibilitätskontrolle lokal gegen gespeicherte Azure-Rohdaten nachstellen |
 | `Dockerfile` | Container-Image (Python 3.12 + poppler) |
 | `docker-compose.yml` | Stack-Definition (GHCR-Image, Build-Fallback) |
 | `post-consume.sh` | Hook-Script für den Paperless-Container |
@@ -227,6 +266,8 @@ geändert, sondern über `RECEIPT_TRIGGER_TAG` / `RECEIPT_PERSON_TAGS` /
   Preise im Azure-Portal); kein Rasterisieren/Bild-Resize nötig. Der
   `AZURE_DI_LOCALE`-Hint ist kostenlos; Add-ons über `AZURE_DI_FEATURES`
   (z. B. `ocrHighResolution`) kosten pro Seite extra.
+- **Kosten Zweitmeinung:** fällt nur bei Belegen an, die Azure auch nach
+  Auto-Korrektur nicht stimmig liefert – Kosten wie Option B pro solchem Beleg.
 - **Kosten (Option B, Anthropic):** Ein Bon ≈ 1 Bild + ~500 Output-Token →
   deutlich unter 1 Cent pro Beleg mit `claude-sonnet-4-6`. Sparsamer:
   `claude-haiku-4-5-20251001`.

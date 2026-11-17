@@ -41,6 +41,8 @@ from openpyxl.styles import Font, PatternFill
 from pdf2image import convert_from_bytes
 from PIL import Image
 
+import plausibility
+
 # ----------------------------------------------------------------------------
 # Konfiguration (per Environment)
 # ----------------------------------------------------------------------------
@@ -60,6 +62,12 @@ AZURE_DI_CONFIDENCE_THRESHOLD = float(os.environ.get("AZURE_DI_CONFIDENCE_THRESH
 AZURE_DI_LOCALE = os.environ.get("AZURE_DI_LOCALE", "de-DE")  # leer = Auto-Erkennung
 # Kommasepariert, z. B. "ocrHighResolution" (kostenpflichtiges Add-on)
 AZURE_DI_FEATURES = [f.strip() for f in os.environ.get("AZURE_DI_FEATURES", "").split(",") if f.strip()]
+# Rohantwort von Azure DI + Originaldokument in OUTPUT_DIR/.azure_raw/ ablegen
+# (zum Analysieren problematischer Belege und Nachstellen mit tools/replay.py)
+AZURE_DI_DEBUG_DUMP = os.environ.get("AZURE_DI_DEBUG_DUMP", "").lower() in ("1", "true", "yes", "ja")
+# Zweitmeinung, wenn Azure DI auch nach automatischer Korrektur nicht eindeutig
+# ist: "anthropic" | "openai" | leer (= aus). Nutzt die ANTHROPIC_*/OPENAI_*-Einstellungen.
+SECOND_OPINION_PROVIDER = os.environ.get("SECOND_OPINION_PROVIDER", "").strip().lower()
 
 OUTPUT_DIR = Path(os.environ.get("OUTPUT_DIR", "/output"))
 OPEN_FILENAME = os.environ.get("OPEN_FILENAME", "Auslagen_offen.xlsx")
@@ -68,6 +76,9 @@ LOCK_FILE = OUTPUT_DIR / ".receipt_worker.lock"
 RECEIPT_TRIGGER_TAG = os.environ.get("RECEIPT_TRIGGER_TAG", "Auslagen")
 RECEIPT_PERSON_TAGS = [t.strip() for t in os.environ.get("RECEIPT_PERSON_TAGS", "").split(",") if t.strip()]
 RECEIPT_PROCESSED_TAG = os.environ.get("RECEIPT_PROCESSED_TAG", "Verarbeitet")
+# Positionen, die nie abgerechnet werden (Anteil 0), z. B. "Extra Bacon,Extra Speck".
+# Teiltext-Vergleich ohne Groß-/Kleinschreibung – möglichst spezifisch wählen.
+RECEIPT_EXCLUDE_ITEMS = [t.strip() for t in os.environ.get("RECEIPT_EXCLUDE_ITEMS", "").split(",") if t.strip()]
 SCAN_INTERVAL_MINUTES = int(os.environ.get("SCAN_INTERVAL_MINUTES", "30"))
 
 # --- Benachrichtigung (beides optional, unabhängig voneinander nutzbar) ---
@@ -225,8 +236,8 @@ def images_to_base64_png(images):
 # ----------------------------------------------------------------------------
 # LLM-Aufruf (Anthropic nativ oder OpenAI-kompatibel/Ollama)
 # ----------------------------------------------------------------------------
-def call_llm(b64_images, prompt):
-    if PROVIDER == "anthropic":
+def call_llm(b64_images, prompt, provider=None):
+    if (provider or PROVIDER) == "anthropic":
         content = []
         for b64 in b64_images:
             content.append({
@@ -333,43 +344,51 @@ def call_azure_di(doc_bytes):
 
 
 def normalize_azure_result(analyze_result):
-    """Bringt das Azure-DI-Ergebnis in dieselbe Form wie parse_llm_json()."""
-    documents = analyze_result.get("documents") or [{}]
-    fields = documents[0].get("fields", {})
+    """Bringt das Azure-DI-Ergebnis in dieselbe Form wie parse_llm_json()
+    (Logik in plausibility.py, damit sie ohne Worker-Umgebung testbar ist)."""
+    return plausibility.normalize_azure_result(analyze_result, AZURE_DI_CONFIDENCE_THRESHOLD)
 
-    def currency(field):
-        value = (field or {}).get("valueCurrency")
-        return value.get("amount") if value else None
 
-    positionen = []
-    for item in (fields.get("Items") or {}).get("valueArray", []):
-        obj = item.get("valueObject", {})
-        menge = (obj.get("Quantity") or {}).get("valueNumber") or 1
-        preis = currency(obj.get("Price"))
-        zsum = currency(obj.get("TotalPrice"))
-        if preis is None:
-            preis = round(zsum / menge, 2) if zsum is not None and menge else 0.0
-        if zsum is None:
-            zsum = round(menge * preis, 2)
-        confidences = [
-            (obj.get(k) or {}).get("confidence", 1.0)
-            for k in ("Description", "Quantity", "Price", "TotalPrice")
-            if obj.get(k)
-        ]
-        positionen.append({
-            "artikel": (obj.get("Description") or {}).get("valueString", "?"),
-            "menge": menge,
-            "einzelpreis": preis,
-            "zeilensumme": zsum,
-            "unsicher": any(c < AZURE_DI_CONFIDENCE_THRESHOLD for c in confidences),
-        })
+def dump_debug(doc_id, suffix, payload=None, raw_bytes=None):
+    """Legt Debug-Daten unter OUTPUT_DIR/.azure_raw/ ab (nur mit AZURE_DI_DEBUG_DUMP)."""
+    if not AZURE_DI_DEBUG_DUMP:
+        return
+    try:
+        folder = OUTPUT_DIR / ".azure_raw"
+        folder.mkdir(exist_ok=True)
+        target = folder / f"{doc_id}{suffix}"
+        if raw_bytes is not None:
+            target.write_bytes(raw_bytes)
+        else:
+            target.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Debug-Dump %s fehlgeschlagen: %s", suffix, e)
 
-    return {
-        "markt": (fields.get("MerchantName") or {}).get("valueString"),
-        "datum": (fields.get("TransactionDate") or {}).get("valueDate"),
-        "bon_summe": currency(fields.get("Total")),
-        "positionen": positionen,
-    }
+
+def guess_extension(content_type):
+    if "pdf" in content_type:
+        return ".pdf"
+    if "png" in content_type:
+        return ".png"
+    return ".jpg"
+
+
+def second_opinion(content, content_type, azure_data):
+    """Holt eine Zweitmeinung per Vision-LLM. Gibt (daten, info, akzeptiert)
+    zurück; akzeptiert nur, wenn das LLM-Ergebnis in sich exakt aufgeht und zur
+    Azure-Bon-Summe passt (falls Azure eine gelesen hat)."""
+    log.info("Azure-Ergebnis nicht eindeutig – hole Zweitmeinung (%s) ...", SECOND_OPINION_PROVIDER)
+    images = rasterize(content, content_type)
+    raw = call_llm(images_to_base64_png(images), PROMPT, provider=SECOND_OPINION_PROVIDER)
+    llm, info = plausibility.reconcile(parse_llm_json(raw))
+    azure_bon = azure_data.get("bon_summe")
+    bon_match = azure_bon is None or (
+        llm.get("bon_summe") is not None
+        and abs(float(llm["bon_summe"]) - float(azure_bon)) < plausibility.SUM_TOL)
+    log.info("Zweitmeinung: Status %s, Differenz %s, inkonsistente Zeilen %d, "
+             "Bon-Summe passt zu Azure: %s", info["status"], info["differenz"],
+             info["inkonsistente_zeilen"], bon_match)
+    return llm, info, (info["status"] != "unklar" and bon_match)
 
 
 # ----------------------------------------------------------------------------
@@ -399,6 +418,7 @@ HEADER_FONT = Font(bold=True)
 CHECK_FILL = PatternFill("solid", fgColor="FFF3B0")   # gelb: bitte prüfen
 OK_FILL = PatternFill("solid", fgColor="C6EFCE")      # grün
 WARN_FILL = PatternFill("solid", fgColor="FFC7CE")    # rot
+INFO_FILL = PatternFill("solid", fgColor="DDEBF7")    # blau: automatisch korrigiert
 
 SUM_SHEET = "Summe"
 EUR_FMT = '#,##0.00 "€"'
@@ -471,6 +491,7 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
 
     betrag_auslagen = 0.0
     inkonsistente = 0
+    ausgeschlossen = []   # (Zeile, Zeilensumme) automatisch nicht abgerechneter Positionen
     row = 2
     for pos in data["positionen"]:
         menge = float(pos.get("menge") or 1)
@@ -493,9 +514,13 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
             inkonsistente += 1
         if pos.get("unsicher"):
             hinweise.append("⚠ Position unsicher gelesen")
-        if hinweise:
-            hc = sheet.cell(row=row, column=7, value=", ".join(hinweise))
-            hc.fill = WARN_FILL
+        korrekturen = ["🔧 " + k for k in pos.get("korrektur") or []]
+        if pos.get("ausschluss"):
+            korrekturen.append(f"➖ nicht abgerechnet („{pos['ausschluss']}“ in RECEIPT_EXCLUDE_ITEMS)")
+            ausgeschlossen.append((row, zsum))
+        if hinweise or korrekturen:
+            hc = sheet.cell(row=row, column=7, value=", ".join(hinweise + korrekturen))
+            hc.fill = WARN_FILL if hinweise else INFO_FILL
         betrag_auslagen += round(anteil * preis, 2)
         row += 1
 
@@ -532,23 +557,37 @@ def add_receipt_sheet(data, doc_id, doc_title, person):
         status.fill = OK_FILL if (plausibel and inkonsistente == 0) else WARN_FILL
 
         # Zweite Kontrolle: Abrechnungsbetrag muss (bei voller Übernahme
-        # jeder Position) ebenfalls der Bon-Summe entsprechen.
+        # jeder Position) ebenfalls der Bon-Summe entsprechen – abzüglich
+        # automatisch ausgeschlossener Positionen (RECEIPT_EXCLUDE_ITEMS).
         check_row += 1
-        sheet.cell(row=check_row, column=1,
-                   value="Kontrolle: Abrechnungsbetrag vs. Bon-Summe")
+        erwartet_ref = f"E{check_row - 1}"
+        erwartet = float(bon_summe)
+        if ausgeschlossen:
+            sheet.cell(row=check_row, column=1,
+                       value="Kontrolle: Abrechnungsbetrag vs. Bon-Summe abzgl. Ausschlüsse")
+            ec = sheet.cell(row=check_row, column=5, value=(
+                f"={erwartet_ref}" + "".join(f"-D{r}" for r, _ in ausgeschlossen)))
+            ec.number_format = EUR_FMT
+            erwartet_ref = f"E{check_row}"
+            erwartet -= sum(z for _, z in ausgeschlossen)
+        else:
+            sheet.cell(row=check_row, column=1,
+                       value="Kontrolle: Abrechnungsbetrag vs. Bon-Summe")
         c = sheet.cell(row=check_row, column=6, value=f"=F{total_row}")
         c.number_format = EUR_FMT
         sheet.cell(
             row=check_row, column=7,
-            value=(f'=IF(ABS(F{total_row}-E{check_row - 1})<0.02,'
+            value=(f'=IF(ABS(F{total_row}-{erwartet_ref})<0.02,'
                    f'"✓ stimmt überein","⚠ Differenz – Blatt prüfen!")'))
-        if abs(betrag_auslagen - float(bon_summe)) >= 0.02:
+        if abs(betrag_auslagen - erwartet) >= 0.02:
             plausibel = False
 
     if plausibel is False or inkonsistente > 0:
         sheet.sheet_properties.tabColor = "FF6666"
     sheet.cell(row=check_row + 1, column=1,
                value=f"Quelle: Paperless-Dokument #{doc_id} – {doc_title}")
+    if data.get("quelle"):
+        sheet.cell(row=check_row + 2, column=1, value=f"Erkennung: {data['quelle']}")
 
     # Summenblatt ergänzen
     ws = wb[SUM_SHEET]
@@ -628,17 +667,44 @@ def process_document(doc_id):
                  doc_id, ", ".join(persons) if persons else "gemeinsam")
 
         content, content_type = download_document(doc_id)
+        zweitmeinung = False
         if PROVIDER == "azure_di":
-            data = normalize_azure_result(call_azure_di(content))
+            analyze_result = call_azure_di(content)
+            dump_debug(doc_id, ".azure.json", payload=analyze_result)
+            dump_debug(doc_id, guess_extension(content_type), raw_bytes=content)
+            data, info = plausibility.reconcile(normalize_azure_result(analyze_result))
+            log.info("Plausibilität Azure: Status %s, Differenz %s, inkonsistente Zeilen %d, "
+                     "korrigierte Positionen %d %s", info["status"], info["differenz"],
+                     info["inkonsistente_zeilen"], info["korrekturen"], info.get("regeln", ""))
+            data["quelle"] = {"ok": "Azure DI",
+                              "korrigiert": "Azure DI, automatisch korrigiert",
+                              "unklar": "Azure DI (nicht eindeutig)"}[info["status"]]
+            if info["status"] == "unklar" and SECOND_OPINION_PROVIDER:
+                try:
+                    llm, _, accepted = second_opinion(content, content_type, data)
+                    dump_debug(doc_id, ".zweitmeinung.json", payload=llm)
+                    if accepted:
+                        llm["markt"] = llm.get("markt") or data.get("markt")
+                        llm["datum"] = llm.get("datum") or data.get("datum")
+                        llm["quelle"] = (f"Zweitmeinung {SECOND_OPINION_PROVIDER} "
+                                         f"(Azure DI nicht eindeutig)")
+                        data = llm
+                        zweitmeinung = True
+                    else:
+                        data["quelle"] += (f"; Zweitmeinung {SECOND_OPINION_PROVIDER} "
+                                           f"ebenfalls nicht eindeutig")
+                except Exception as e:  # noqa: BLE001
+                    log.warning("Zweitmeinung fehlgeschlagen – Azure-Ergebnis wird verwendet: %s", e)
+                    data["quelle"] += f"; Zweitmeinung fehlgeschlagen: {str(e)[:120]}"
         else:
             images = rasterize(content, content_type)
             raw = call_llm(images_to_base64_png(images), PROMPT)
             data = parse_llm_json(raw)
 
-        for pos in data["positionen"]:
-            pos["anteil"] = pos.get("menge") or 1
+        plausibility.apply_shares(data, RECEIPT_EXCLUDE_ITEMS)
 
         unsichere = sum(1 for p in data["positionen"] if p.get("unsicher"))
+        korrigierte = sum(1 for p in data["positionen"] if p.get("korrektur"))
         targets = persons or [""]
         for person in targets:
             betrag, plausibel, inkonsistente, sheet = add_receipt_sheet(
@@ -655,9 +721,14 @@ def process_document(doc_id):
                 msg += f" ⚠ {inkonsistente} Zeile(n) rechnerisch inkonsistent."
             if unsichere:
                 msg += f" ⚠ {unsichere} Position(en) unsicher gelesen."
+            if korrigierte:
+                msg += f" 🔧 {korrigierte} Position(en) automatisch korrigiert."
+            if zweitmeinung:
+                msg += f" 🤖 Zweitmeinung ({SECOND_OPINION_PROVIDER}) verwendet."
             notify({"event": "receipt_processed", "person": person, "markt": data.get("markt"),
                     "betrag_auslagen": betrag, "plausibel": plausibel,
                     "unsichere_positionen": unsichere, "inkonsistente_zeilen": inkonsistente,
+                    "korrigierte_positionen": korrigierte, "zweitmeinung": zweitmeinung,
                     "sheet": sheet, "doc_id": doc_id, "message": msg})
 
         mark_processed(doc_id)

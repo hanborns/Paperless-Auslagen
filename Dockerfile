@@ -13,7 +13,7 @@ RUN pip install --no-cache-dir \
     pillow==11.*
 
 WORKDIR /app
-COPY worker.py .
+COPY worker.py plausibility.py ./
 
 EXPOSE 5000
 CMD ["python", "worker.py"]
