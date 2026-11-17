@@ -246,6 +246,65 @@ def rule_fold_zero_components(data, ctx):
     return changes
 
 
+def _matches_any(text, terms):
+    text = (text or "").lower()
+    return any(t.strip().lower() in text for t in terms if t and t.strip())
+
+
+def rule_fold_priced_addons(data, ctx):
+    """Burger-King-Muster: Aufpreis-Extras ("Extra Käse EUR 1,20",
+    "Extra Bacon@1,20 EUR 2,40") stehen mit eigenem Betrag UNTER der
+    Hauptposition, sind in deren Zeilensumme aber NICHT enthalten. Fachlich
+    gehören sie zur Hauptposition: ihr Betrag wird zur Zeilensumme der
+    letzten Nicht-Extra-Position davor addiert, der Einzelpreis daraus neu
+    berechnet (Menge bleibt). Die Gesamtsumme ändert sich nicht – die Regel
+    läuft daher immer, und zwar NACH rule_fold_zero_components (sonst wäre
+    im Menü die preislose Komponente direkt über dem Extra die Elternzeile).
+
+    Extras, die auf ctx["keep_separate"] passen (RECEIPT_EXCLUDE_ITEMS),
+    bleiben eigene Zeilen, damit sie weiter Anteil 0 bekommen können."""
+    keep = ctx.get("keep_separate") or ()
+    out, changes = [], 0
+    for pos in data["positionen"]:
+        artikel = pos.get("artikel") or ""
+        zsum = zeilensumme(pos)
+        parent = next((p for p in reversed(out) if not _is_addon(p.get("artikel"))), None)
+        if (_is_addon(artikel) and zsum > 0 and parent is not None
+                and zeilensumme(parent) > 0 and not _matches_any(artikel, keep)
+                and _parse_qty_line(artikel) is None):
+            parent.setdefault("_extras", []).append(pos)
+            if pos.get("unsicher"):
+                parent["unsicher"] = True
+            changes += 1
+            continue
+        out.append(pos)
+    for pos in out:
+        extras = pos.pop("_extras", None)
+        if not extras:
+            continue
+        menge = _f(pos.get("menge"), 1) or 1
+        alt_zsum, alt_preis = zeilensumme(pos), _f(pos.get("einzelpreis"))
+        neu_zsum = round(alt_zsum + sum(zeilensumme(e) for e in extras), 2)
+        basis = pos.get("artikel_basis") or pos.get("artikel") or "?"
+        artikel = pos.get("artikel") or basis
+        rest = artikel[len(basis):] if artikel.startswith(basis) else ""
+        namen = " + ".join((e.get("artikel") or "?").strip() for e in extras)
+        pos["artikel_basis"] = basis
+        pos["artikel"] = f"{basis} + {namen}{rest}"
+        pos["zeilensumme"] = neu_zsum
+        pos["einzelpreis"] = round(neu_zsum / menge, 2)
+        details = ", ".join(f"{(e.get('artikel') or '?').strip()} {_eur(zeilensumme(e))}" for e in extras)
+        _note(pos, f"Extras eingerechnet: {details} (Bon-Zeile {_eur(alt_zsum)}, "
+                   f"Einzelpreis vorher {_eur(alt_preis)})")
+    data["positionen"] = out
+    return changes
+
+
+def fold_priced_addons(data, keep_separate=()):
+    """Öffentlicher Einstieg für Provider ohne reconcile() (LLM-Pfad)."""
+    return rule_fold_priced_addons(data, {"keep_separate": tuple(keep_separate)})
+
+
 def rule_merge_quantity_lines(data, ctx):
     """Aldi-/Discounter-Muster: Mengenzeile wie "2 x 0,99" oder
     "0,524 kg x 2,99 EUR/kg" wurde als eigene Position erkannt. Sie wird der
@@ -416,20 +475,22 @@ RULES = [
 ]
 
 
-def reconcile(data):
-    """Gibt (data, info) zurück. info["status"]:
+def reconcile(data, keep_separate=()):
+    """Gibt (data, info) zurück. keep_separate: Begriffe (RECEIPT_EXCLUDE_ITEMS),
+    deren Aufpreis-Extras NICHT in die Hauptposition gefaltet werden.
+    info["status"]:
       "ok"         – passte bereits (ggf. nur strukturell aufgeräumt)
       "korrigiert" – erst nach automatischer Korrektur exakt plausibel
       "unklar"     – auch mit Korrekturen nicht eindeutig; Original bleibt
     """
     rates = sorted({s["satz"] for s in data.get("steuersaetze") or [] if s.get("satz")}) \
         or list(DEFAULT_VAT_RATES)
-    ctx = {"rates": rates}
+    ctx = {"rates": rates, "keep_separate": tuple(keep_separate)}
 
     # Rein strukturelle Aufräumschritte, die die Summe nicht verändern, werden
     # immer angewendet (Mengenzeilen ohne eigenen/mit verrutschtem Betrag
     # zuordnen, Menge aus "@Stückpreis" ableiten, preislose Menü-Komponenten
-    # zusammenfassen).
+    # zusammenfassen, bezahlte Extras in die Hauptposition einrechnen).
     work = copy.deepcopy(data)
     candidate = copy.deepcopy(work)
     if rule_merge_quantity_lines(candidate, ctx):
@@ -439,6 +500,7 @@ def reconcile(data):
             work = candidate
     rule_at_price_quantity(work, ctx)
     rule_fold_zero_components(work, ctx)
+    rule_fold_priced_addons(work, ctx)
     base = copy.deepcopy(work)
 
     if assess(work)["ok"]:

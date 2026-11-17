@@ -59,9 +59,11 @@ def test_zero_price_components_folded_into_menu():
                     pos("Extra Bacon", 0.80)], 10.79)
     out, info = reconcile(data)
     assert info["status"] == "ok"
-    assert amounts(out) == [9.99, 0.80]
-    assert out["positionen"][0]["artikel"] == "Whopper Menü: Whopper, Pommes M, Cola M"
-    assert out["positionen"][0]["korrektur"]
+    # bezahltes Extra wird in die Menü-Zeile eingerechnet
+    assert amounts(out) == [10.79]
+    assert out["positionen"][0]["artikel"] == "Whopper Menü + Extra Bacon: Whopper, Pommes M, Cola M"
+    assert out["positionen"][0]["artikel_basis"] == "Whopper Menü"
+    assert len(out["positionen"][0]["korrektur"]) == 2
 
 
 def test_priced_components_summing_to_menu_are_folded():
@@ -190,34 +192,72 @@ def _bk_azure_like(extra_desc_with_at):
     ], 62.84)
 
 
-def test_bk_extras_inherit_quantity_from_at_price():
+def test_bk_extras_added_to_main_position():
     out, info = reconcile(_bk_azure_like(True))
-    assert info["status"] in ("ok", "korrigiert")
-    got = [(p["artikel"].split(":")[0], p["menge"], round(plausibility.zeilensumme(p), 2))
-           for p in out["positionen"]]
-    assert got == [("King Fusion Oreo", 1, 3.49), ("Whopper", 2, 14.58), ("Extra Käse", 2, 2.40),
-                   ("Extra Bacon", 2, 2.40), ("Whopper King Menü", 1, 12.19), ("Extra Käse", 1, 1.20),
-                   ("Plant-based Whopper King Menü", 2, 24.18), ("Extra Käse", 2, 2.40)]
-    menu = out["positionen"][4]
+    assert info["status"] == "ok"
+    assert info["inkonsistente_zeilen"] == 0
+    got = [(p.get("artikel_basis", p["artikel"]), p["menge"], p["einzelpreis"],
+            round(plausibility.zeilensumme(p), 2)) for p in out["positionen"]]
+    assert got == [("King Fusion Oreo", 1, 3.49, 3.49),
+                   ("Whopper", 2, 9.69, 19.38),
+                   ("Whopper King Menü", 1, 13.39, 13.39),
+                   ("Plant-based Whopper King Menü", 2, 13.29, 26.58)]
+    whopper, menu = out["positionen"][1], out["positionen"][2]
+    assert whopper["artikel"] == "Whopper + Extra Käse + Extra Bacon"
+    assert "Extra Käse 2,40, Extra Bacon 2,40 (Bon-Zeile 14,58" in whopper["korrektur"][-1]
     # Komponenten hängen am Menü, nicht am bezahlten "Extra Käse" dazwischen
-    assert menu["artikel"] == ("Whopper King Menü: Whopper, Curly Fries + Dip, "
+    assert menu["artikel"] == ("Whopper King Menü + Extra Käse: Whopper, Curly Fries + Dip, "
                                "Extra Sour Cream Dip, 0,5 l Fuze Tea Lemon")
 
 
-def test_bk_extras_without_at_price_fixed_by_ratio():
+def test_bk_extras_without_at_price():
+    # ohne "@" bleibt die Hauptzeile 1 × 14,58; die inkonsistenten
+    # Extra-Zeilen (1 × 1,20 = 2,40) gehen im Einrechnen auf
     out, info = reconcile(_bk_azure_like(False))
-    assert info["status"] == "korrigiert"
-    assert [p["menge"] for p in out["positionen"]][:4] == [1, 1, 2, 2]  # Whopper: 1×14,58 bleibt (kein @)
+    assert info["status"] == "ok"
     assert info["inkonsistente_zeilen"] == 0
+    assert amounts(out) == [3.49, 19.38, 13.39, 26.58]
 
 
-def test_exclusion_only_matches_own_name():
-    out, _ = reconcile(_bk_azure_like(True))
+def test_bk_real_receipt_structure_menu_first():
+    # Aufbau wie ein echter Bon mit Gesamtsumme 46,06 (Menü zuerst)
+    data = receipt([
+        pos("Whopper King Menü", 12.19), pos("Whopper", 0.0, preis=0.0),
+        pos("Extra Käse", 1.20), pos("große King Pommes + 1 Dip", 0.0, preis=0.0),
+        pos("Extra Pommes-Sauce", 0.0, preis=0.0), pos("0,5 l Fuze Tea Lemon", 0.0, preis=0.0),
+        pos("Whopper@7,29", 14.58, 2, 7.29), pos("Extra Käse@1,20", 2.40, 1, 1.20),
+        pos("Extra Bacon@1,20", 2.40, 1, 1.20),
+        pos("Plant-based Whopper King Menü", 12.09), pos("Plant-based Whopper", 0.0, preis=0.0),
+        pos("Extra Käse", 1.20), pos("Curly Fries + Dip", 0.0, preis=0.0),
+    ], 46.06)
+    out, info = reconcile(data)
+    assert info["status"] == "ok"
+    got = [(p["menge"], p["einzelpreis"], p["zeilensumme"]) for p in out["positionen"]]
+    assert got == [(1, 13.39, 13.39), (2, 9.69, 19.38), (1, 13.29, 13.29)]
+
+
+def test_excluded_extra_stays_separate():
+    out, info = reconcile(_bk_azure_like(True), keep_separate=["Extra Bacon"])
+    assert info["status"] == "ok"
+    names = [p.get("artikel_basis", p["artikel"]) for p in out["positionen"]]
+    assert names[:3] == ["King Fusion Oreo", "Whopper", "Extra Bacon"]
+    assert amounts(out)[:3] == [3.49, 16.98, 2.40]
     out["positionen"].append(pos("Bacon King", 8.99))
-    out["positionen"][4]["artikel"] += ", Extra Bacon"   # als Komponente im Menü
-    n = plausibility.apply_shares(out, ["Extra Bacon"])
-    assert n == 1
-    assert [p["anteil"] for p in out["positionen"]] == [1, 2, 2, 0, 1, 1, 2, 2, 1]
+    assert plausibility.apply_shares(out, ["Extra Bacon"]) == 1
+    assert [p["anteil"] for p in out["positionen"]] == [1, 2, 0, 1, 2, 1]
+
+
+def test_addon_without_parent_is_kept():
+    data = receipt([pos("Extra Käse", 1.20), pos("Cola", 2.50)], 3.70)
+    out, _ = reconcile(data)
+    assert amounts(out) == [1.20, 2.50]
+
+
+def test_fold_priced_addons_for_llm_path():
+    data = receipt([pos("Whopper", 7.29), pos("Extra Käse", 1.20)], 8.49)
+    assert plausibility.fold_priced_addons(data) == 1
+    assert amounts(data) == [8.49]
+    assert data["positionen"][0]["einzelpreis"] == 8.49
 
 
 def test_shares_default_full_quantity():

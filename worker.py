@@ -380,7 +380,7 @@ def second_opinion(content, content_type, azure_data):
     log.info("Azure-Ergebnis nicht eindeutig – hole Zweitmeinung (%s) ...", SECOND_OPINION_PROVIDER)
     images = rasterize(content, content_type)
     raw = call_llm(images_to_base64_png(images), PROMPT, provider=SECOND_OPINION_PROVIDER)
-    llm, info = plausibility.reconcile(parse_llm_json(raw))
+    llm, info = plausibility.reconcile(parse_llm_json(raw), RECEIPT_EXCLUDE_ITEMS)
     azure_bon = azure_data.get("bon_summe")
     bon_match = azure_bon is None or (
         llm.get("bon_summe") is not None
@@ -672,7 +672,8 @@ def process_document(doc_id):
             analyze_result = call_azure_di(content)
             dump_debug(doc_id, ".azure.json", payload=analyze_result)
             dump_debug(doc_id, guess_extension(content_type), raw_bytes=content)
-            data, info = plausibility.reconcile(normalize_azure_result(analyze_result))
+            data, info = plausibility.reconcile(normalize_azure_result(analyze_result),
+                                               RECEIPT_EXCLUDE_ITEMS)
             log.info("Plausibilität Azure: Status %s, Differenz %s, inkonsistente Zeilen %d, "
                      "korrigierte Positionen %d %s", info["status"], info["differenz"],
                      info["inkonsistente_zeilen"], info["korrekturen"], info.get("regeln", ""))
@@ -700,6 +701,8 @@ def process_document(doc_id):
             images = rasterize(content, content_type)
             raw = call_llm(images_to_base64_png(images), PROMPT)
             data = parse_llm_json(raw)
+            # Aufpreis-Extras gehören zur Hauptposition (wie im Azure-Pfad)
+            plausibility.fold_priced_addons(data, RECEIPT_EXCLUDE_ITEMS)
 
         plausibility.apply_shares(data, RECEIPT_EXCLUDE_ITEMS)
 

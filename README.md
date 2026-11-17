@@ -47,6 +47,15 @@ Hinweis-Spalte. Geht es auch so nicht auf, kann optional eine Zweitmeinung
 per Claude eingeholt werden (siehe „Zweitmeinung" unten) – sonst bleibt das
 Azure-Ergebnis mit ⚠-Markierung stehen.
 
+**Aufpreis-Extras** (Burger King: „Extra Käse EUR 1,20", „Extra
+Bacon@1,20 EUR 2,40") stehen auf dem Bon als eigene Zeile unter der
+Hauptposition und sind in deren Zeilensumme nicht enthalten. Der Worker
+rechnet sie immer in die Hauptposition darüber ein (Zeilensumme = Bon-Zeile
++ Extras, Einzelpreis neu berechnet, Artikel „Whopper + Extra Käse");
+der 🔧-Hinweis nennt die Einzelbeträge und die ursprüngliche Bon-Zeile.
+Extras, die auf `RECEIPT_EXCLUDE_ITEMS` passen, bleiben eigene Zeilen
+(Anteil 0).
+
 **Verarbeitet-Tag:** Nach erfolgreicher Verarbeitung setzt der Worker den Tag
 `Verarbeitet` (konfigurierbar über `RECEIPT_PROCESSED_TAG`) – das ist der
 Duplikatschutz. Ihn in Paperless zu entfernen lässt den Beleg beim nächsten
