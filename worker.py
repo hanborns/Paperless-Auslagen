@@ -307,7 +307,7 @@ def call_llm(b64_images, prompt, provider=None):
             },
             json={
                 "model": ANTHROPIC_MODEL,
-                "max_tokens": 4000,
+                "max_tokens": 8000,
                 "messages": [{"role": "user", "content": content}],
             },
             timeout=300,
@@ -330,7 +330,7 @@ def call_llm(b64_images, prompt, provider=None):
         json={
             "model": OPENAI_MODEL,
             "messages": [{"role": "user", "content": content}],
-            "max_tokens": 4000,
+            "max_tokens": 8000,
             "temperature": 0,
         },
         timeout=3600,  # lokale CPU-Inferenz kann dauern
@@ -351,6 +351,21 @@ def parse_llm_json(text):
     if not isinstance(data.get("positionen"), list) or not data["positionen"]:
         raise ValueError("Antwort enthält keine Positionen")
     return data
+
+
+def llm_extract(b64_images, provider=None):
+    """Vision-LLM-Extraktion mit EINEM Wiederholversuch, wenn die Antwort kein
+    gültiges JSON ist (lange Bons: kaputte Kommas, abgeschnittene Antwort)."""
+    raw = call_llm(b64_images, PROMPT, provider=provider)
+    try:
+        return parse_llm_json(raw)
+    except ValueError as e:   # json.JSONDecodeError ist eine ValueError
+        log.warning("LLM-Antwort kein gültiges JSON (%s) – frage einmal erneut", e)
+        retry_prompt = (PROMPT + "\n\nWICHTIG: Deine vorige Antwort war kein gültiges JSON "
+                        f"({str(e)[:120]}). Antworte jetzt AUSSCHLIESSLICH mit einem einzigen, "
+                        "syntaktisch gültigen JSON-Objekt – ohne Text davor oder danach, "
+                        "ohne Kommentare, ohne Markdown.")
+        return parse_llm_json(call_llm(b64_images, retry_prompt, provider=provider))
 
 
 # ----------------------------------------------------------------------------
@@ -432,8 +447,8 @@ def second_opinion(content, content_type, azure_data):
     Azure-Bon-Summe passt (falls Azure eine gelesen hat)."""
     log.info("Azure-Ergebnis nicht eindeutig – hole Zweitmeinung (%s) ...", SECOND_OPINION_PROVIDER)
     images = rasterize(content, content_type)
-    raw = call_llm(images_to_base64_png(images), PROMPT, provider=SECOND_OPINION_PROVIDER)
-    llm, info = plausibility.reconcile(parse_llm_json(raw), RECEIPT_EXCLUDE_ITEMS)
+    llm, info = plausibility.reconcile(llm_extract(images_to_base64_png(images), SECOND_OPINION_PROVIDER),
+                                       RECEIPT_EXCLUDE_ITEMS)
     azure_bon = azure_data.get("bon_summe")
     bon_match = azure_bon is None or (
         llm.get("bon_summe") is not None
@@ -788,8 +803,7 @@ def process_document(doc_id):
                     data["quelle"] += f"; Zweitmeinung fehlgeschlagen: {str(e)[:120]}"
         else:
             images = rasterize(content, content_type)
-            raw = call_llm(images_to_base64_png(images), PROMPT)
-            data = parse_llm_json(raw)
+            data = llm_extract(images_to_base64_png(images))
             # Aufpreis-Extras gehören zur Hauptposition (wie im Azure-Pfad)
             plausibility.fold_priced_addons(data, RECEIPT_EXCLUDE_ITEMS)
 

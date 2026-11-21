@@ -24,6 +24,7 @@ schreiben, in RULES eintragen und mit einem Testfall absichern.
 """
 
 import copy
+import itertools
 import datetime
 import re
 
@@ -82,6 +83,7 @@ def normalize_azure_result(analyze_result, confidence_threshold=0.7):
             # Hilfsfelder für die Zuordnungsregeln (nicht im Excel)
             "_ohne_text": not (obj.get("Description") or {}).get("valueString"),
             "_offset": min((s.get("offset", 0) for s in spans), default=None),
+            "_code": ((obj.get("ProductCode") or {}).get("valueString") or "").strip() or None,
         })
 
     steuersaetze = []
@@ -230,8 +232,13 @@ def rule_fold_zero_components(data, ctx):
     Ändert keine Beträge – wird daher immer angewendet."""
     out, changes = [], 0
     positionen = data["positionen"]
+    content = data.get("_content") or ""
     for idx, pos in enumerate(positionen):
         is_zero = abs(zeilensumme(pos)) < 0.005 and abs(_f(pos.get("einzelpreis"))) < 0.005
+        # Position mit eigener Artikelnummer-Zeile im Bontext ("708517 H-Sahne")
+        # ist ein eigenständiger Artikel (ALDI), keine Menü-Komponente
+        if is_zero and _has_code_line(content, pos.get("_code")):
+            is_zero = False
         # Artikel direkt vor/nach einer Mengenzeile nicht anfassen – der Betrag
         # ist dort evtl. nur verrutscht (rule_merge_quantity_lines)
         near_qty = any(
@@ -350,6 +357,49 @@ def rule_merge_amount_without_text(data, ctx):
             pos["zeilensumme"] = zeilensumme(nxt)
             pos["einzelpreis"] = round(zeilensumme(nxt) / menge, 2)
             _note(pos, f"Betrag {_eur(zeilensumme(nxt))} aus Folgezeile ohne Artikeltext übernommen")
+            del pos_list[i + 1]
+            changes += 1
+        i += 1
+    return changes
+
+
+def _has_code_line(content, code):
+    """Steht im Bontext eine Zeile "<Artikelnummer> <Name>"?"""
+    if not code or not content:
+        return False
+    return re.search(rf"(?m)^[ \t]*{re.escape(code)}[ \t]+\S", content) is not None
+
+
+def _norm(text):
+    return " ".join((text or "").split()).lower()
+
+
+# Kurzer Namensrest ohne eigenen Artikel: Größe/Gewicht/Packung ("200g",
+# "500 ml", "4x64", "1,5L", "10 Stk")
+_NAME_TAIL = re.compile(
+    r"^\s*(\d+(?:[.,]\d+)?\s*(?:g|kg|ml|l|cl|stk|st|er)?|\d+\s*[x×]\s*\d+(?:[.,]\d+)?\s*(?:g|ml|l)?)\.?\s*$",
+    re.IGNORECASE)
+
+
+def rule_merge_split_name(data, ctx):
+    """Azure hat EINE Artikelzeile in zwei Positionen geteilt (ALDI #23082:
+    "H-Sahne" mit Artikelnummer, aber ohne Betrag + "200g" ohne Artikelnummer
+    mit 0,89). Zusammenführen, wenn der zweite Teil nur ein Namensrest
+    (Größe/Gewicht) ist und "<A> <B>" so als Zeile im Bontext steht."""
+    lines = {_norm(re.sub(r"^\s*\d{4,8}\s+", "", line))
+             for line in (data.get("_content") or "").split("\n")}
+    pos_list, changes, i = data["positionen"], 0, 0
+    while i < len(pos_list) - 1:
+        a, b = pos_list[i], pos_list[i + 1]
+        name = f"{(a.get('artikel') or '').strip()} {(b.get('artikel') or '').strip()}"
+        if (not _no_text(a) and abs(zeilensumme(a)) < 0.005 and abs(_f(a.get("einzelpreis"))) < 0.005
+                and not b.get("_code") and zeilensumme(b) > 0
+                and _NAME_TAIL.match(b.get("artikel") or "") and _norm(name) in lines):
+            a["artikel"] = name
+            a["menge"], a["einzelpreis"], a["zeilensumme"] = b.get("menge") or 1, b.get("einzelpreis"), zeilensumme(b)
+            a["unsicher"] = bool(a.get("unsicher") or b.get("unsicher"))
+            _note(a, f"Artikelname war auf zwei Positionen verteilt – „{b.get('artikel', '').strip()}“ "
+                     f"mit Betrag {_eur(zeilensumme(b))} angehängt")
             del pos_list[i + 1]
             changes += 1
         i += 1
@@ -480,46 +530,69 @@ def _amounts_below(lines, idx):
     return out
 
 
+def _code_lines(lines, name):
+    """Artikelnummern aller Zeilen "<Code> <name>" im Bontext (Reihenfolge wie im Text)."""
+    rx = re.compile(rf"^\s*(\d{{4,8}})\s+{re.escape(name)}\s*$")
+    return [m.group(1) for m in (rx.match(line) for line in lines) if m]
+
+
+def _price_from_peers(lines, pos_list, name):
+    """Der Name steht mit eigener Artikelnummer n-mal im Bontext, als eigene
+    Position aber nur (n-1)-mal, alle zum selben Preis -> (preis, code)."""
+    codes = _code_lines(lines, name)
+    peers = [p for p in pos_list if (p.get("artikel") or "").strip() == name]
+    if not peers or len(codes) != len(peers) + 1:
+        return None
+    if not all(_single_unit(p) for p in peers):
+        return None
+    preise = {round(zeilensumme(p), 2) for p in peers}
+    if len(preise) != 1:
+        return None
+    return preise.pop(), codes[0]
+
+
 def rule_split_merged_description(data, ctx):
     """Azure hat zwei Artikel zu einer Position zusammengezogen
     (Description "Bananen Bio\\nClementin Bio 750g") und einen Betrag
     verloren. Aufteilung:
-      - der vorhandene Betrag bleibt bei dem Artikel, unter dem er im
-        Bontext steht (sonst beim ersten),
-      - der andere Artikel bekommt den Betrag unter ihm im Bontext. Bei
-        genau zwei Artikeln mit eigener Artikelnummer im Text darf er auch
-        aus der fehlenden Differenz zur Bon-Summe kommen – wenn der Text dort
-        nur einen verstümmelten Betrag ("2,4%" für 2,49) oder einen
-        unpassenden (verrutschten) hat.
+      - der vorhandene Betrag bleibt bei dem Artikel, zu dem die
+        Artikelnummer der Position im Bontext gehört ("279409 Blutorangensaft"),
+        sonst bei dem, unter dem er im Bontext steht, sonst beim ersten,
+      - der andere Artikel bekommt
+          1. den Preis desselben Artikels, wenn er im Bontext mit eigener
+             Artikelnummer einmal öfter steht als er als Position vorkommt
+             (ALDI #23082: "Küchenrollen" 2× im Text, 1× als Position),
+          2. die fehlende Differenz zur Bon-Summe, wenn sie zum Betrag (oder
+             verstümmelten Betrag "2,4%") unter ihm im Bontext passt – oder,
+             nur bei genau EINER zusammengezogenen Position, beide Namen eine
+             Artikelnummer im Text haben und kein exakter Textbetrag dagegen
+             spricht,
+          3. sonst den Betrag unter ihm im Bontext.
+    Abgeleitete Beträge (1. und 2.) werden nur übernommen, wenn alle
+    Aufteilungen zusammen exakt die fehlende Differenz ergeben.
     Ändert die Summe – läuft daher nur über RULES (exakt aufgehen oder
     verwerfen)."""
     lines = (data.get("_content") or "").split("\n")
-    pos_list, changes, i = data["positionen"], 0, 0
+    pos_list = data["positionen"]
     bon = data.get("bon_summe")
-    while i < len(pos_list):
-        pos = pos_list[i]
-        names = [n.strip() for n in (pos.get("artikel") or "").split("\n") if n.strip()]
-        if len(names) < 2:
-            i += 1
-            continue
-        idx = {n: _name_line(lines, n) for n in names}
-        found = {n: _amounts_below(lines, idx[n]) for n in names}
-        zsum = zeilensumme(pos)
-        # Wem gehört der vorhandene Betrag?
-        owner = next((n for n in names if any(a is not None and abs(a - zsum) <= 0.005
-                                                for a, _, _ in found[n])), names[0])
-        others = [n for n in names if n != owner]
-        missing = None
-        if bon is not None:
-            missing = round(_f(bon) - sum(zeilensumme(p) for p in pos_list), 2)
-        with_codes = all(idx[n] is not None and _CODE_LINE.match(lines[idx[n]]) for n in names)
+    missing = None if bon is None else round(_f(bon) - sum(zeilensumme(p) for p in pos_list), 2)
+    merged = [k for k, p in enumerate(pos_list)
+              if len([n for n in (p.get("artikel") or "").split("\n") if n.strip()]) >= 2]
 
-        neue = {}
+    def plan_for(pos, names, owner, idx, found):
+        """Beträge für die abgetrennten Artikel -> ({name: (betrag, quelle)}, abgeleitet) | None"""
+        with_codes = all(idx[n] is not None and _CODE_LINE.match(lines[idx[n]]) for n in names)
+        others = [n for n in names if n != owner]
+        neue, derived = {}, False
         for n in others:
             exact = [(a, t) for a, _, t in found[n] if a is not None]
             fuzzy = [(p, t) for _, p, t in found[n] if p is not None]
             betrag, quelle = None, None
-            if missing is not None and missing > 0 and len(others) == 1:
+            peer = _price_from_peers(lines, pos_list, n)
+            if peer:
+                betrag, quelle = peer[0], f"Preis vom gleichen Artikel (Code {peer[1]}) übernommen"
+                derived = True
+            elif missing is not None and missing > 0 and len(others) == 1:
                 hit_exact = next((t for a, t in exact if abs(a - missing) <= 0.005), None)
                 hit_fuzzy = next((t for p, t in fuzzy if f"{missing:.2f}".startswith(p)), None)
                 if hit_exact:
@@ -527,17 +600,61 @@ def rule_split_merged_description(data, ctx):
                 elif hit_fuzzy:
                     betrag, quelle = missing, (f"aus Bon-Summe abgeleitet (Bontext „{hit_fuzzy}“ "
                                                f"unvollständig gelesen)")
-                elif with_codes:
+                    derived = True
+                elif with_codes and len(merged) == 1 and not exact:
                     betrag, quelle = missing, "aus Bon-Summe abgeleitet (im Bontext nicht lesbar)"
+                    derived = True
             if betrag is None and exact:
                 betrag, quelle = exact[0][0], "aus dem Bontext"
             if betrag is None:
-                break
+                return None
             neue[n] = (betrag, quelle)
-        if len(neue) != len(others):
-            i += 1
-            continue
+        return neue, derived
 
+    # Pro zusammengezogener Position alle Besitzer-Hypothesen in
+    # Prioritätsreihenfolge: Artikelnummer der Position, Betrag unter dem
+    # Namen, erster Name. Beide Signale können täuschen (#23072: Code der
+    # Paprika, Betrag des Pflücksalats; #23082: Bontext um eine Zeile versetzt).
+    options = []
+    for k in merged:
+        pos = pos_list[k]
+        names = [n.strip() for n in (pos.get("artikel") or "").split("\n") if n.strip()]
+        idx = {n: _name_line(lines, n) for n in names}
+        found = {n: _amounts_below(lines, idx[n]) for n in names}
+        zsum, code = zeilensumme(pos), pos.get("_code")
+        owners = [n for n in names if code and code in _code_lines(lines, n)]
+        owners += [n for n in names if any(a is not None and abs(a - zsum) <= 0.005 for a, _, _ in found[n])]
+        owners.append(names[0])
+        opts = []
+        for owner in dict.fromkeys(owners):
+            p = plan_for(pos, names, owner, idx, found)
+            if p:
+                opts.append((k, names, owner, p[0], p[1]))
+        if opts:
+            options.append(opts)
+    if not options:
+        return 0
+
+    # Erste Kombination, die exakt die fehlende Differenz ergibt; sonst die
+    # bevorzugte, sofern sie ohne abgeleitete Beträge auskommt.
+    chosen = None
+    for combo in itertools.islice(itertools.product(*options), 256):
+        total = round(sum(b for c in combo for b, _ in c[3].values()), 2)
+        if missing is not None and abs(total - missing) <= 0.005:
+            chosen = combo
+            break
+    if chosen is None:
+        first = tuple(opts[0] for opts in options)
+        if any(c[4] for c in first):
+            return 0
+        chosen = first
+    plans = {c[0]: (c[1], c[2], c[3]) for c in chosen}
+
+    changes = 0
+    for k in sorted(plans, reverse=True):
+        names, owner, neue = plans[k]
+        pos = pos_list[k]
+        zsum = zeilensumme(pos)
         result = []
         for n in names:
             if n == owner:
@@ -556,9 +673,8 @@ def rule_split_merged_description(data, ctx):
                 result.append({"artikel": n, "menge": 1, "einzelpreis": betrag, "zeilensumme": betrag,
                                "unsicher": pos.get("unsicher", False),
                                "korrektur": [f"von „{owner}“ abgetrennt, Betrag {_eur(betrag)} {quelle}"]})
-        pos_list[i:i + 1] = result
-        changes += len(others)
-        i += len(result)
+        pos_list[k:k + 1] = result
+        changes += len(names) - 1
     return changes
 
 
@@ -763,8 +879,8 @@ def reconcile(data, keep_separate=()):
     # zuordnen, Menge aus "@Stückpreis" ableiten, preislose Menü-Komponenten
     # zusammenfassen, bezahlte Extras in die Hauptposition einrechnen).
     work = copy.deepcopy(data)
-    for rule in (rule_merge_amount_without_text, rule_shift_weight, rule_shift_unit_price,
-                 rule_merge_quantity_lines, rule_content_quantities):
+    for rule in (rule_merge_split_name, rule_merge_amount_without_text, rule_shift_weight,
+                 rule_shift_unit_price, rule_merge_quantity_lines, rule_content_quantities):
         work = _structural(work, rule, ctx)
     rule_at_price_quantity(work, ctx)
     rule_fold_zero_components(work, ctx)

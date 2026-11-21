@@ -398,3 +398,59 @@ def test_split_merged_needs_article_codes_when_amount_unreadable():
     out, info = reconcile(data)
     assert info["status"] == "korrigiert"
     assert [p["zeilensumme"] for p in out["positionen"]] == [2.49, 1.39]
+
+
+def _c(artikel, zsum, code=None, menge=1, preis=None):
+    p = _nb(artikel, zsum, menge, preis)
+    p["_code"] = code
+    return p
+
+
+def test_split_name_over_two_positions_is_merged_not_folded():
+    # Azure teilt EINE Zeile "708517 H-Sahne 200g" in "H-Sahne" (Code, ohne
+    # Betrag) + "200g" (Betrag, ohne Code) – darf nicht als Menü-Komponente
+    # in den Vorgänger gefaltet werden.
+    content = "335520 Mousse 150g\n2,59 A\n708517 H-Sahne 200g\n0,89 A\n"
+    data = receipt([_c("Mousse 150g", 2.59, "335520"), _c("H-Sahne", 0.0, "708517"),
+                    _c("200g", 0.89)], 3.48, _content=content)
+    out, info = reconcile(data)
+    assert info["status"] == "ok"
+    assert [(p["artikel"], p["zeilensumme"]) for p in out["positionen"]] == [
+        ("Mousse 150g", 2.59), ("H-Sahne 200g", 0.89)]
+    assert "zwei Positionen" in out["positionen"][1]["korrektur"][0]
+
+
+def test_zero_position_with_own_article_code_is_not_a_component():
+    content = "111111 Brot\n1,99 A\n222222 Butter\n"
+    data = receipt([_c("Brot", 1.99, "111111"), _c("Butter", 0.0, "222222")], 1.99,
+                   _content=content)
+    out, _ = reconcile(data)
+    assert [p["artikel"] for p in out["positionen"]] == ["Brot", "Butter"]
+
+
+def test_split_merged_owner_by_code_and_price_from_identical_articles():
+    # Bontext um eine Zeile versetzt (Betrag unter dem Namen gehört zum
+    # Vorgänger). Zwei zusammengezogene Positionen, je ein Betrag verloren:
+    # Besitzer über die Artikelnummer, fehlender Preis vom gleichen Artikel.
+    content = ("100001 Rolle\nEUR\n100001 Rolle\n2,65 B\n200002 Saft\n2,65 B\n"
+               "300003 Muesli\n2,49 B\n400004 Schoko\n3,29 A\n400004 Schoko\n2,19 A\n")
+    data = receipt([_c("Rolle", 2.65, "100001"), _c("Rolle\nSaft", 2.49, "200002"),
+                    _c("Muesli\nSchoko", 3.29, "300003"), _c("Schoko", 2.19, "400004")],
+                   15.46, _content=content)
+    out, info = reconcile(data)
+    assert info["status"] == "korrigiert"
+    assert [(p["artikel"], p["zeilensumme"]) for p in out["positionen"]] == [
+        ("Rolle", 2.65), ("Rolle", 2.65), ("Saft", 2.49),
+        ("Muesli", 3.29), ("Schoko", 2.19), ("Schoko", 2.19)]
+    assert "gleichen Artikel (Code 100001)" in out["positionen"][1]["korrektur"][0]
+
+
+def test_split_merged_bon_sum_fallback_not_with_several_merged_positions():
+    # Zwei zusammengezogene Positionen, Beträge nirgends ableitbar: die ganze
+    # Differenz darf nicht einem einzelnen Artikel zugeschlagen werden.
+    content = "100001 A\n200002 B\n300003 C\n400004 D\n"
+    data = receipt([_c("A\nB", 1.00, "100001"), _c("C\nD", 2.00, "300003")], 6.00,
+                   _content=content)
+    out, info = reconcile(data)
+    assert info["status"] == "unklar"
+    assert amounts(out) == [1.00, 2.00]
